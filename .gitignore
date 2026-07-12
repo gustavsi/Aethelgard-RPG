@@ -24,3 +24,5 @@ static/
 # Local/Gitignore folder
 gitignore/
 scratch/
+docs/
+
