@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+ENV/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+saves/
+savegame.json
+
+# Node/Frontend
+frontend/node_modules/
+frontend/dist/
+static/
+
+# IDEs
+.vscode/
+.idea/
+
+# Local/Gitignore folder
+gitignore/
+scratch/

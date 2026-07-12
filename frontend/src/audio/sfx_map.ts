@@ -1,0 +1,23 @@
+export const SFX_MAP: Record<string, string> = {
+  "SWOOSH!": "/audio/sfx/swoosh.mp3",
+  "Screeech!": "/audio/sfx/shadow_whisper.mp3",
+  "RUUUMBLE!": "/audio/sfx/stone_grind.mp3",
+  "HOLY PURIFICATION": "/audio/sfx/holy_heal.mp3",
+  "PALADIN CHALLENGE": "/audio/sfx/hit_critical.mp3",
+  "INQUISITOR APPARITION": "/audio/sfx/shadow_whisper.mp3",
+  "PORTAL GUARDIAN AWAKEN": "/audio/sfx/stone_grind.mp3",
+  "HIT_NORMAL": "/audio/sfx/hit_normal.mp3",
+  "HIT_CRITICAL": "/audio/sfx/hit_critical.mp3",
+  "LEVEL_UP": "/audio/sfx/level_up.mp3",
+  "CLICK": "/audio/sfx/click.mp3",
+  "PAGE_TURN": "/audio/sfx/page_turn.mp3",
+  "VICTORY": "/audio/sfx/victory_jingle.mp3",
+  "DEFEAT": "/audio/sfx/defeat.mp3",
+  "magic_cast": "/audio/sfx/magic_cast.mp3",
+  "arrow_release": "/audio/sfx/arrow_release.mp3",
+  "heal_chime": "/audio/sfx/heal_chime.mp3",
+  "boss_roar": "/audio/sfx/boss_roar.mp3",
+  "boss_phase_change": "/audio/sfx/boss_phase_change.mp3",
+  "party_member_down": "/audio/sfx/party_member_down.mp3",
+  "revive": "/audio/sfx/revive.mp3"
+};

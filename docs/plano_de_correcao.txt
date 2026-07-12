@@ -1,0 +1,393 @@
+================================================================================
+PIKA RPG — PLANO DE CORRECAO BRUTAL
+Diagnostico completo de bugs, design, UX e melhorias
+================================================================================
+
+
+================================================================================
+BUGS - O QUE ESTA QUEBRADO
+================================================================================
+
+BUG-01: current_location nunca e atualizado durante o jogo
+Arquivo: engine/world.py (todos os capitulos)
+Problema: state.current_location e inicializado como "tutorial" em state.py e
+NUNCA e sobrescrito durante a progressao do jogo. Isso significa que
+getScenarioBackground() em NarrativeView.tsx SEMPRE retornara o background de
+tutorial (ou null), independente de onde o jogador estiver.
+Solucao: Adicionar ao inicio de cada metodo de capitulo/local:
+  self.state.current_location = "floresta"   # em chapter_1_forest()
+  self.state.current_location = "estrada"    # em chapter_1_road()
+  self.state.current_location = "cabana"     # em chapter_1_cabin()
+  self.state.current_location = "bosque"     # em chapter_1_sacred_grove()
+  self.state.current_location = "oakhaven"   # em visit_oakhaven()
+  self.state.current_location = "caverna"    # em chapter_2_caves()
+  self.state.current_location = "templo"     # em chapter_3_temple()
+
+--------------------------------------------------------------------------------
+BUG-02: test_flows.py - testes instanciam CombatSystem com Player, nao GameState
+Arquivo: tests/test_flows.py, linhas 40, 60, 81
+Problema: Os testes passam player diretamente, criando GameState fantasma local.
+Funciona isoladamente mas nao testa o path real de producao (world.py usa self.state).
+Solucao:
+  from engine.state import GameState
+  state = GameState(player)
+  combat = CombatSystem(state, [enemy])
+
+--------------------------------------------------------------------------------
+BUG-03: uiContext nunca e limpo apos STATE_UPDATE sem WAITING_INPUT
+Arquivo: frontend/src/contexts/WebSocketProvider.tsx, linhas 75-82
+Problema: Quando chega STATE_UPDATE, o uiContext anterior (com opcoes do menu)
+permanece. NarrativeView pode mostrar botoes velhos enquanto backend ja avancou.
+Solucao:
+  if (data.type === 'STATE_UPDATE' && data.state) {
+    setUiContext(null); // limpar aqui
+    setGameState(prev => { ... });
+  }
+
+--------------------------------------------------------------------------------
+BUG-04: WebSocketProvider nao reconecta apos queda da conexao
+Arquivo: frontend/src/contexts/WebSocketProvider.tsx, linhas 107-109
+Problema: onclose apenas seta connected=false. Se servidor reiniciar, jogador
+precisa recarregar a pagina e perde o progresso narrativo.
+Solucao: Exponential backoff com tentativas de reconexao.
+
+--------------------------------------------------------------------------------
+BUG-05: server.py - /api/game/load nao carrega save, cria jogo novo
+Arquivo: server.py, linhas 91-94 e 107
+Problema: load_game_route() apenas gera novo session_id. O websocket_endpoint
+SEMPRE cria Player novo ignorando completamente se e load ou new game.
+Botao "Continuar Jornada" e uma mentira — comeca novo jogo sempre.
+Solucao:
+  sessions = {}
+  @app.post("/api/game/load")
+  async def load_game_route():
+      session_id = str(uuid.uuid4())
+      sessions[session_id] = {"type": "load"}
+      return {"session_id": session_id}
+
+  No websocket_endpoint:
+  is_load = sessions.get(session_id, {}).get("type") == "load"
+  if is_load:
+      loaded_state = load_game()
+      world = WorldManager(loaded_state or Player("Heroi Web", CharacterClass.GUERREIRO))
+  else:
+      world = WorldManager(Player("Heroi Web", CharacterClass.GUERREIRO))
+
+--------------------------------------------------------------------------------
+BUG-06: console.py - play_sound_effect nunca roteia para o web bridge
+Arquivo: engine/console.py, linhas 66-69
+Problema: play_sound_effect() usa print() diretamente. Efeito sonoro ("HA-HA!")
+vai para stdout do servidor, nao para narrativeLog do React.
+Solucao:
+  def play_sound_effect(effect_text, color=Colors.BRIGHT_MAGENTA):
+      bridge = WebBridgeStorage.get_bridge()
+      if bridge:
+          bridge.send_to_client("TEXT", f"🔊 {effect_text.upper()} 🔊")
+          return
+      print(f"\a\n {color}🔊 * {effect_text.upper()} * 🔊{Colors.RESET}\n")
+      time.sleep(0.8)
+
+--------------------------------------------------------------------------------
+BUG-07: draw_box nao roteia para web bridge - recompensas de combate invisiveis
+Arquivo: engine/combat_ui.py, linha 83; server.py BridgeWrapper
+Problema: Apos vitoria, draw_box("Resultados do Combate",...) chama
+send_to_client("BOX",...) mas BridgeWrapper nao tem handler para "BOX".
+Mensagem de recompensa (ouro, XP, loot) NUNCA chega ao React.
+Solucao no BridgeWrapper (server.py):
+  elif msg_type == "BOX":
+      lines = content.get("lines", [])
+      title = content.get("title", "")
+      full_text = f"=== {title} ===\n" + "\n".join(lines)
+      send_to_ws({"type": "NARRATIVE_TEXT", "content": full_text})
+
+--------------------------------------------------------------------------------
+BUG-08: GameState.to_dict() - combat_state.copy() e shallow copy
+Arquivo: engine/state.py, linha 64
+Problema: combat_state.copy() e copia rasa. Campo "enemies" e lista de dicts.
+Se CombatSystem modificar um inimigo enquanto to_dict() serializa (outra thread),
+resultado pode ter estado inconsistente.
+Solucao:
+  import copy
+  "combat_state": copy.deepcopy(self.combat_state) if self.combat_state else None
+
+--------------------------------------------------------------------------------
+BUG-09: CombatView - botoes de combate nao quebram texto longo
+Arquivo: frontend/src/components/CombatView.tsx, linha 163
+Problema: tracking-widest uppercase sem whitespace-normal. Textos longos como
+"Usar Habilidade: Golpe de Sombra" transbordam ou sao cortados.
+Solucao:
+  className="... whitespace-normal text-left h-auto py-4 px-5"
+
+--------------------------------------------------------------------------------
+BUG-10: console.log de debug esquecido em producao
+Arquivo: frontend/src/components/NarrativeView.tsx, linha 28
+         frontend/src/contexts/WebSocketProvider.tsx, linha 76
+Problema: Poluem DevTools e expoem estado interno do jogo.
+Solucao: Remover ou envolver em import.meta.env.DEV
+
+
+================================================================================
+DESIGN - O QUE ESTA FEIO E COMO MELHORAR
+================================================================================
+
+DIAGNOSTICO GERAL: A interface parece painel administrativo com tema dark, nao
+um RPG. Usa font-mono em tudo (fonte de codigo, nao epica), tem contrastes planos
+sem profundidade, sprites perdidos no vazio sem atmosfera, barras de HP/MP pequenas
+demais para dar drama ao combate.
+
+--------------------------------------------------------------------------------
+DESIGN-01: Tipografia - font-mono em tudo destroi a imersao
+Arquivo: frontend/src/components/GameContainer.tsx, linha 34
+         frontend/src/App.tsx, linha 49
+Problema: font-mono como fonte padrao do jogo inteiro. Mono e para logs e codigo,
+nao para narrativa epica. NarrativeView em Courier New lembra terminal Linux.
+index.css importa Cinzel e Inter mas NENHUM componente usa essas fontes.
+Solucao:
+  1. Mudar wrapper raiz para font-sans
+  2. Adicionar ao tailwind.config ou index.css:
+     font-cinzel: 'Cinzel', serif
+     font-inter: 'Inter', sans-serif
+  3. NarrativeView: textos narrativos -> Inter
+  4. Titulos, nomes de inimigos/jogador -> Cinzel
+  5. Logs de combate SOMENTE -> font-mono
+
+--------------------------------------------------------------------------------
+DESIGN-02: HUD - header plano e sem hierarquia visual
+Arquivo: frontend/src/components/GameContainer.tsx, linhas 36-46
+Problema: Header mostra texto plano "Heroi Web Nivel 1 ... 0G" sem barras
+visuais, sem separacao por secao, sem indicador de capitulo. Completamente
+sem personalidade para um RPG.
+Solucao - Redesenhar com barras reais de HP/MP e tipografia Cinzel.
+Adicionar: nome (Cinzel), nivel, capitulo, barra HP vermelha gradiente,
+barra MP azul gradiente, ouro.
+
+--------------------------------------------------------------------------------
+DESIGN-03: CombatView Arena - sprites flutuam no vazio sem chao ou atmosfera
+Arquivo: frontend/src/components/CombatView.tsx, linhas 73-78
+Problema: Fundo e so "bg-black" com radial-gradient fraco vermelho/10.
+Sprites aparecem jogados no vazio, sem perspectiva ou profundidade.
+Solucao:
+  1. Usar cenario_*.jpg como background da arena com blur+opacity baixo
+  2. Adicionar linha de "chao" sutil na base
+  3. Adicionar vignette nas bordas:
+     bg-[radial-gradient(ellipse_80%_80%_at_50%_50%,transparent_40%,rgba(0,0,0,0.8)_100%)]
+
+--------------------------------------------------------------------------------
+DESIGN-04: CombatView Log - itens sem diferenciacao clara
+Arquivo: frontend/src/components/CombatView.tsx, linhas 64-70
+Problema: Colorizacao frágil com includes('dano') e includes('curou').
+Busca inconsistente — "causou X de dano" vs "sofreu X de dano". Logs de
+critico, fugiu, buff ficam na mesma cor cinza neutra.
+Solucao - Funcao classifyLog() robusta:
+  const classifyLog = (log: string) => {
+    const l = log.toLowerCase();
+    if (l.includes('dano') || l.includes('causou') || l.includes('sofreu') || l.includes('sangra')) return 'damage';
+    if (l.includes('curou') || l.includes('recuperou')) return 'heal';
+    if (l.includes('critico')) return 'crit';
+    if (l.includes('fugiu') || l.includes('escapou')) return 'fled';
+    if (l.includes('efeito') || l.includes('veneno') || l.includes('queima')) return 'status';
+    return 'neutral';
+  };
+  Cores: damage=red-400, heal=green-400, crit=orange-300 bold, fled=yellow italic,
+         status=purple-400, neutral=gray-400
+
+--------------------------------------------------------------------------------
+DESIGN-05: CombatView Comandos - botoes sao genericos demais
+Arquivo: frontend/src/components/CombatView.tsx, linhas 158-170
+Problema: Todos botoes identicos — mesmo tamanho, cor, estilo. Sem hierarquia
+visual: Atacar deveria ser primario, Habilidades especial, Fugir discreto.
+Solucao - Mapear chaves para estilos:
+  const actionStyle = {
+    "1": "border-red-700 text-red-400 hover:border-red-400",       // Atacar
+    "2": "border-purple-700 text-purple-400 hover:border-purple-400", // Habilidades
+    "3": "border-blue-700 text-blue-400 hover:border-blue-400",    // Itens
+    "4": "border-yellow-700 text-yellow-500 hover:border-yellow-400", // Defender
+    "5": "border-gray-700 text-gray-500 hover:border-gray-400",    // Fugir
+  };
+
+--------------------------------------------------------------------------------
+DESIGN-06: NarrativeView - texto narrativo sem hierarquia ou formatacao
+Arquivo: frontend/src/components/NarrativeView.tsx, linhas 66-73
+Problema: Todos textos narrativos em divs identicos. Sem distincao entre
+narracao do mundo, dialogo de NPC, narracao de acao ou prompts de escolha.
+Solucao - classifyNarrative():
+  if (text.startsWith('🔊') || text.includes('*')) return 'sound';
+  if (text.includes('"') || text.includes('"')) return 'dialogue';
+  if (text.startsWith('===') || text.startsWith('---')) return 'title';
+  return 'narration';
+  
+  Estilos:
+  sound: 'text-purple-300 italic text-sm'
+  dialogue: 'text-yellow-200 pl-4 border-l-2 border-yellow-700'
+  title: 'text-yellow-400 font-cinzel font-bold text-center text-xl mt-4 mb-2'
+  narration: 'text-gray-300 leading-loose'
+
+--------------------------------------------------------------------------------
+DESIGN-07: Tela de Menu Principal - absolutamente sem charme epico
+Arquivo: frontend/src/App.tsx, linhas 48-75
+Problema: Retangulo cinza com "PIKA RPG" amarelo e dois botoes. Para RPG de
+dark fantasy isso e catastroficamente generico. Nao ha logo, arte, animacao.
+Solucao minima:
+  1. Usar ASCII art do jogo (ja existe em art.py) como hero art no React
+  2. Animacao de entrada com @keyframes fade-in + slide-up
+  3. Cinzel para o titulo com letter-spacing dramatico
+  4. Subtitulo "Cronicas de Aethelgard" com amber glow
+  5. Background: bg-[#070508] com radial-gradient elliptico
+
+--------------------------------------------------------------------------------
+DESIGN-08: index.css tem classes nao utilizadas e conflita com Tailwind
+Arquivo: frontend/src/index.css
+Problema: Define .game-container, .header, .combat-area, .actors, .sprite-container,
+.bar-container etc. Nenhuma usada pelos componentes React — dead code da versao
+anterior. body { display: flex } causa centralizacao global conflitante com h-screen.
+Solucao:
+  1. Remover classes CSS nao utilizadas
+  2. Manter apenas @keyframes (float, floatEnemy, slideIn) como utilities
+  3. Remover body { display: flex }
+
+
+================================================================================
+UX - O QUE ESTA CONFUSO PARA O JOGADOR
+================================================================================
+
+UX-01: Turno do inimigo - jogador fica olhando para tela congelada
+Arquivo: engine/combat_ui.py, linha 69; CombatView.tsx, linhas 171-176
+Problema: Apos jogador agir, frontend mostra "Aguardando Turno..." pulsante.
+Nao ha indicacao de que o INIMIGO esta atacando. Parece travamento.
+Solucao: CombatView exibir mensagem baseada na phase:
+  ENEMY_TURN: "⚔ {nomeInimigo} esta agindo..."
+  COMPANION_TURN: "{nomeCompanheiro} esta agindo..."
+
+--------------------------------------------------------------------------------
+UX-02: Nao ha feedback de "pressione qualquer tecla" na Web
+Arquivo: engine/console.py, linhas 192-201
+Problema: press_any_key() exibe WAITING_INPUT sem opcoes. React renderiza campo
+de texto vazio. Jogador nao sabe que qualquer texto serve. Parece quebrado.
+Solucao:
+  1. BridgeWrapper tratar "INPUT" com tipo especial PRESS_ANY_KEY
+  2. NarrativeView: renderizar botao estilizado "Pressionar para continuar"
+     ao inves de campo de texto livre
+
+--------------------------------------------------------------------------------
+UX-03: Recompensas de combate invisiveis na Web
+Ver BUG-07. Apos vencer Salteador, nenhuma mensagem de XP/Gold aparece.
+HUD atualiza sozinho sem explicacao. Desorientante.
+
+--------------------------------------------------------------------------------
+UX-04: Botao "Continuar Jornada" funciona como "Novo Jogo"
+Ver BUG-05. Jogador clica esperando carregar save, jogo recomeça do zero.
+
+--------------------------------------------------------------------------------
+UX-05: Sem indicacao de qual capitulo/localizacao o jogador esta
+Arquivo: frontend/src/components/GameContainer.tsx
+Problema: HUD nao mostra "Capitulo 1 - Floresta Sombria". NarrativeLog acumula
+textos sem cabecalho de cena. Jogador pode se perder.
+Solucao (com BUG-01 corrigido):
+  Adicionar ao HUD: "📍 {gameState?.current_location}"
+
+--------------------------------------------------------------------------------
+UX-06: Habilidades e Itens nao implementados na CombatUI Web
+Arquivo: engine/combat_ui.py, linhas 102-110
+Problema: Escolha "2" (Habilidades) tem apenas `pass` — retorna None como Command.
+CombatSystem recebe None, causa crash silencioso ou loop infinito.
+Solucao:
+  elif choice == "2":
+      skills = self.combat.player.skills
+      if not skills:
+          return self.prompt_action()
+      skill_opts = {str(i+1): s.name for i, s in enumerate(skills)}
+      skill_choice = get_menu_choice(skill_opts, prompt="Qual habilidade? ")
+      skill = skills[int(skill_choice)-1]
+      return Command(action="SKILL", value=skill)
+
+--------------------------------------------------------------------------------
+UX-07: Barra de MP do inimigo ausente
+Arquivo: frontend/src/components/CombatView.tsx, linhas 109-115
+Problema: Apenas HP mostrado para inimigos. Jogador nao tem como antecipar
+quando inimigo vai curar ou usar habilidade especial.
+Solucao: Adicionar mp/max_mp ao payload de inimigos em combat.py:
+  "mp": getattr(e, 'mp', 0),
+  "max_mp": getattr(e, 'max_mp', 0),
+  Exibir barra MP azul quando max_mp > 0.
+
+
+================================================================================
+MELHORIAS - O QUE VALE ADICIONAR
+================================================================================
+
+MELHORIA-01: Animacao de dano (damage shake + floating numbers)
+Arquivo: frontend/src/components/CombatView.tsx
+Quando HP do inimigo muda, exibir numero flutuante "-47" em vermelho subindo.
+@keyframes floatUp: translateY de 0 a -60px com fade out
+@keyframes shake: translateX oscilando +-8px
+
+--------------------------------------------------------------------------------
+MELHORIA-02: Painel de inventario/status acessivel fora do combate
+Arquivo: frontend/src/components/NarrativeView.tsx
+Botao flutuante de inventario que abre modal lateral mostrando equipamentos,
+itens consumiveis e skills. Requer expor player.inventory, skills no to_dict().
+
+--------------------------------------------------------------------------------
+MELHORIA-03: Historico de decisoes (Journal)
+GameState ja tem flags (ogro_poupado, ajudou_elena). Popular um Journal:
+  "✓ Voce poupou o Ogro da Cabana"
+  "✓ Voce ajudou Elena na Floresta"
+
+--------------------------------------------------------------------------------
+MELHORIA-04: Indicador de XP e proximo nivel no HUD
+player.xp e player.xp_next_level nao sao expostos em to_dict().
+Adicionar barra de progressao discreta abaixo do HUD.
+
+--------------------------------------------------------------------------------
+MELHORIA-05: Persistencia de sessao via localStorage
+Arquivo: frontend/src/App.tsx
+Salvar session_id no localStorage. Reconectar automaticamente sem passar pela
+tela de menu. Evita "Novo Jogo acidental" ao dar F5.
+
+--------------------------------------------------------------------------------
+MELHORIA-06: Efeitos de transicao entre NarrativeView e CombatView
+Arquivo: frontend/src/components/GameContainer.tsx, linhas 50-58
+Troca entre visoes e abrupta. Adicionar cross-fade:
+  transition-opacity duration-500
+
+--------------------------------------------------------------------------------
+MELHORIA-07: Testes de integracao WebSocket
+Arquivo: tests/ (novo test_websocket.py)
+Testes atuais so cobrem Python puro. Adicionar com pytest-asyncio + httpx:
+- Servidor responde corretamente a MENU_CHOICE
+- STATE_UPDATE inclui in_combat=True quando em combate
+- Desconexao WS nao deixa engine thread presa
+
+
+================================================================================
+RESUMO EXECUTIVO DE PRIORIDADE
+================================================================================
+
+CRITICO (bloqueiam funcionalidade real):
+  🔴 BUG-01 — current_location nunca atualizado: backgrounds nunca mudam
+  🔴 BUG-05 — load game nao funciona
+  🔴 BUG-07 — recompensas de combate invisiveis
+  🔴 UX-06  — habilidades travam o jogo (choice "2" retorna None/crash)
+
+ALTO (prejudicam significativamente a experiencia):
+  🔴 BUG-03 — uiContext obsoleto apos STATE_UPDATE
+  🔴 BUG-06 — efeitos sonoros invisiveis na Web
+  🟡 UX-01  — turno do inimigo parece travamento da UI
+  🟡 UX-02  — press_any_key incompreensivel na Web
+
+MEDIO (melhoram qualidade mas nao sao blockers):
+  🎨 DESIGN-01 — tipografia: ativar Cinzel e Inter
+  🎨 DESIGN-02 — HUD: barras visuais de HP/MP
+  🎨 DESIGN-03 — Arena: background atmosferico e chao
+  🎨 DESIGN-07 — Tela inicial sem charme epico
+  🟡 UX-05 — sem indicacao de localizacao
+  🟡 UX-07 — MP de inimigos oculto
+
+BAIXO (polish e extras):
+  🎨 DESIGN-04 a 06 — colorizacao logs, botoes coloridos por acao, narrativa tipada
+  🎨 DESIGN-08 — limpar index.css de dead code
+  🟢 MELHORIA-01 a 07
+
+================================================================================
+FIM DO PLANO
+================================================================================
