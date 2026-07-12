@@ -1,0 +1,9 @@
+# Core Dependencies for FastAPI Server & WebSockets
+fastapi>=0.100.0
+uvicorn>=0.20.0
+websockets>=12.0
+
+# Testing & HTTP Clients
+pytest>=8.0.0
+anyio>=4.0.0
+httpx>=0.25.0
