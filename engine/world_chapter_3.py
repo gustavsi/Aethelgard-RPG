@@ -37,6 +37,11 @@ def get_menu_choice(options, prompt="Escolha uma opção: "):
 
 class Chapter3Mixin:
     def chapter_3_start(self):
+        try:
+            from engine.campfire import run_campfire
+            run_campfire(self, chapter_label="pre_ch3")
+        except Exception:
+            pass
         from engine.save_system import save_game
         save_game(self.state, lambda msg: self.adapter.emit(NarrativeText("💾 [Auto-Salvar] Jogo salvo com sucesso.")))
         self.state.current_location = "millhaven"

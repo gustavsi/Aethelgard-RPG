@@ -7,6 +7,15 @@ from engine.enemy import Enemy, spawn_enemy
 from engine.items import get_random_loot, Consumable
 from engine.dto import NarrativeText
 from engine.state import GameState
+from engine.feature_flags import FLAGS
+from engine.combat_intent import (
+    build_intent_view,
+    plan_action_for_enemy,
+    roll_interrupt,
+    intent_dict_for_enemy,
+)
+from engine.combat_combos import find_combos, apply_combo_hit
+from engine import telemetry
 
 class CombatPhase(Enum):
     INIT = "INIT"
@@ -81,6 +90,23 @@ class CombatSystem:
         if hasattr(self.state, 'world') and self.state.world:
             self.state.world.active_combat = self
 
+        # Phase 2: reset per-combat mercy revive token
+        try:
+            from engine.party_meta import on_combat_start
+            on_combat_start(self.state)
+        except Exception:
+            pass
+        try:
+            from engine.party_meta import ensure_meta
+            ensure_meta(self.state)["dark_bargain_used_combat"] = False
+        except Exception:
+            pass
+        try:
+            from engine.terrain_rules import attach_terrain_to_combat
+            attach_terrain_to_combat(self)
+        except Exception:
+            pass
+
         self.sync_state()
 
     def sync_state(self):
@@ -115,11 +141,21 @@ class CombatSystem:
                         "max_mp": getattr(e, 'max_mp', 0),
                         "alive": e.is_alive(),
                         "defending": e.defending,
-                        "status": [k.name_str for k in e.status_effects.keys()]
+                        "status": [k.name_str for k in e.status_effects.keys()],
+                        "intent": intent_dict_for_enemy(e),
                     }
                     for i, e in enumerate(self.enemies)
                 ],
-                "submitted_actions": list(self.pending_actions.keys())
+                "submitted_actions": list(self.pending_actions.keys()),
+                "features": {
+                    "intent": FLAGS.combat_intent,
+                    "combos": FLAGS.combat_combos,
+                },
+                "terrain": getattr(self, "terrain", None) and {
+                    "id": self.terrain.get("id"),
+                    "label": self.terrain.get("label"),
+                    "desc": self.terrain.get("desc"),
+                },
             }
 
     def add_log(self, text: str):
@@ -142,6 +178,14 @@ class CombatSystem:
                 self.client_menu_stages.clear()
                 self.sync_state()
                 
+                from engine.weather_effects import apply_lightning_hazard
+                apply_lightning_hazard(self)
+                from engine.arena_rules import apply_arena_hazard
+                apply_arena_hazard(self)
+                self.check_victory_defeat_or_transformation()
+                if self.is_finished():
+                    continue
+                
                 if self.turn_hook:
                     res = self.turn_hook(self)
                     if res == "END_COMBAT":
@@ -156,19 +200,28 @@ class CombatSystem:
                             self.adapter.on_state_change(self.state)
                         continue
                         
-                if StatusEffect.ATORDOADO in self.player.status_effects:
-                    self.add_log(f"{self.player.name} está atordoado e pulou o turno!")
-                    self.player.status_effects[StatusEffect.ATORDOADO] -= 1
-                    if self.player.status_effects[StatusEffect.ATORDOADO] <= 0:
-                        del self.player.status_effects[StatusEffect.ATORDOADO]
+                # Process status effects for the entire party (not only the leader)
+                party = getattr(self.state, 'party', [self.player])
+                for p in party:
+                    if p.hp > 0:
+                        self.process_target_status_effects(p, p.name, True)
+                self.check_victory_defeat_or_transformation()
+                if self.phase in [CombatPhase.VICTORY, CombatPhase.DEFEAT]:
+                    continue
+
+                # Telegraph next enemy actions for the player decision phase
+                self.plan_enemy_intents()
+
+                # If every living member is stunned, skip straight to enemies
+                living = [p for p in party if p.hp > 0]
+                can_act = [p for p in living if StatusEffect.ATORDOADO not in p.status_effects]
+                if living and not can_act:
+                    for p in living:
+                        if StatusEffect.ATORDOADO in p.status_effects:
+                            self.add_log(f"{p.name} está atordoado e pulou o turno!")
                     self.phase = CombatPhase.ENEMY_TURN
                 else:
-                    self.process_target_status_effects(self.player, self.player.name, True)
-                    self.check_victory_defeat_or_transformation()
-                    if self.phase in [CombatPhase.VICTORY, CombatPhase.DEFEAT]:
-                        continue
-                    else:
-                        self.phase = CombatPhase.WAITING_ALL_PLAYERS
+                    self.phase = CombatPhase.WAITING_ALL_PLAYERS
                         
             elif self.phase == CombatPhase.PLAYER_EXECUTE:
                 self.check_victory_defeat_or_transformation()
@@ -275,13 +328,47 @@ class CombatSystem:
             })
         
         party = getattr(self.state, 'party', [self.player])
-        active_party_members = [p for p in party if p.hp > 0]
+        # Living non-stunned must act; downed may submit DOWNED actions (PRD B4)
+        active_party_members = [
+            p for p in party
+            if (p.hp > 0 and StatusEffect.ATORDOADO not in p.status_effects)
+            or (p.hp <= 0 and FLAGS.content_systems)
+        ]
+        # If content_systems off, ignore downed for wait-gate
+        if not FLAGS.content_systems:
+            active_party_members = [
+                p for p in party
+                if p.hp > 0 and StatusEffect.ATORDOADO not in p.status_effects
+            ]
         active_ids = [getattr(p, 'client_id', None) or 'leader' for p in active_party_members]
         
-        if all(cid in self.pending_actions for cid in active_ids):
+        if not active_ids or all(cid in self.pending_actions for cid in active_ids):
             self.phase = CombatPhase.PARTY_EXECUTE
             if self.adapter and hasattr(self.adapter, 'input_queue'):
                 self.adapter.input_queue.put("ALL_DONE")
+
+    def plan_enemy_intents(self):
+        """Roll AI once per living enemy; store for telegraph + later execution."""
+        if not FLAGS.combat_intent:
+            for e in self.enemies:
+                e.planned_action = None
+                e.intent_view = None
+            return
+        primary = self.player
+        party = getattr(self.state, "party", [self.player])
+        living = [p for p in party if p.hp > 0]
+        if living:
+            primary = living[0]
+        for e in self.enemies:
+            e.intent_interrupted = False
+            if not e.is_alive():
+                e.planned_action = None
+                e.intent_view = build_intent_view("SKIP", e)
+                continue
+            action_type, val, logs = plan_action_for_enemy(e, primary, self)
+            e.planned_action = (action_type, val, logs)
+            e.intent_view = build_intent_view(action_type, e, interrupted=False)
+        self.sync_state()
 
     def resolve_party_turn(self):
         party = getattr(self.state, 'party', [self.player])
@@ -292,19 +379,58 @@ class CombatSystem:
             active_players,
             key=lambda p: (-p.agilidade, 0 if p == leader else 1)
         )
+
+        # Interrupts first (by AGI), so cancelled intents never fire
+        for p in ordered_players:
+            if p.hp <= 0 or StatusEffect.ATORDOADO in p.status_effects:
+                continue
+            cmd = self.pending_actions.get(getattr(p, 'client_id', None) or 'leader')
+            if cmd and cmd.action == "INTERRUPT":
+                self.execute_player_command(p, cmd)
+                self.check_victory_defeat_or_transformation()
+                if self.phase in [CombatPhase.VICTORY, CombatPhase.DEFEAT]:
+                    return
+
+        # Combo detection (bonus applied after individual skills still run)
+        combo_hits = []
+        if FLAGS.combat_combos and len(active_players) >= 2:
+            participants = []
+            for p in active_players:
+                cmd = self.pending_actions.get(getattr(p, 'client_id', None) or 'leader')
+                if cmd and cmd.action != "INTERRUPT":
+                    participants.append((p, cmd))
+            combo_hits = find_combos(participants)
         
         for p in ordered_players:
             if p.hp <= 0:
+                continue
+            if StatusEffect.ATORDOADO in p.status_effects:
+                self.add_log(f"{p.name} está atordoado e não age neste turno!")
                 continue
                 
             cmd = self.pending_actions.get(getattr(p, 'client_id', None) or 'leader')
             if not cmd:
                 continue
+            if cmd.action == "INTERRUPT":
+                continue  # already resolved
                 
             self.execute_player_command(p, cmd)
             self.check_victory_defeat_or_transformation()
-            if self.phase in [CombatPhase.VICTORY, CombatPhase.DEFEAT]:
+            if self.phase in [CombatPhase.VICTORY, CombatPhase.DEFEAT, CombatPhase.FLED]:
                 break
+
+        if combo_hits and self.phase not in [CombatPhase.VICTORY, CombatPhase.DEFEAT, CombatPhase.FLED]:
+            for hit in combo_hits:
+                apply_combo_hit(self, hit)
+                telemetry.track("combat_combo", combo_id=hit.definition.combo_id)
+                try:
+                    from engine.vesper_intel import record_tactic
+                    record_tactic(self.state, "combo")
+                except Exception:
+                    pass
+                self.check_victory_defeat_or_transformation()
+                if self.phase in [CombatPhase.VICTORY, CombatPhase.DEFEAT]:
+                    break
 
     def execute_player_command(self, p, cmd: Command):
         if cmd.action == "ATTACK":
@@ -314,6 +440,16 @@ class CombatSystem:
         elif cmd.action == "DEFEND":
             p.status_effects[StatusEffect.PROTEGIDO] = 1
             self.add_log(f"{p.name} assume uma postura de defesa!")
+            terrain = getattr(self, "terrain", None) or {}
+            if terrain.get("defend_freeze_chance") and random.random() < float(terrain["defend_freeze_chance"]):
+                p.status_effects[StatusEffect.ATORDOADO] = 1
+                self.add_log(f"❄️ O terreno gélido entorpece {p.name} ao se proteger!")
+        elif cmd.action == "DOWNED":
+            try:
+                from engine.downed_roles import execute_downed_action
+                execute_downed_action(self, p, cmd.value or "wait")
+            except Exception:
+                self.add_log(f"{p.name} permanece caído.")
             
         elif cmd.action == "FLEE":
             if not self.can_flee:
@@ -345,13 +481,109 @@ class CombatSystem:
             else:
                 self.add_log(f"{p.name} tentou usar {item.name}, mas não possui mais o item!")
 
+        elif cmd.action == "INTERRUPT":
+            self.execute_interrupt(p, cmd.target)
+
+    def execute_interrupt(self, p, target_idx):
+        if not FLAGS.combat_intent:
+            self.add_log(f"{p.name} tentou interromper, mas a mecânica está desativada.")
+            return
+        telemetry.track("combat_interrupt_attempt")
+        if target_idx is None:
+            self.add_log(f"{p.name} falhou ao interromper (sem alvo).")
+            return
+        try:
+            enemy = self.enemies[int(target_idx)]
+        except (ValueError, IndexError, TypeError):
+            self.add_log(f"{p.name} falhou ao interromper (alvo inválido).")
+            return
+        if not enemy.is_alive():
+            self.add_log(f"{p.name} tentou interromper {enemy.name}, mas o alvo já caiu!")
+            return
+        planned = getattr(enemy, "planned_action", None)
+        view = getattr(enemy, "intent_view", None)
+        if not planned or (view and view.interrupted):
+            self.add_log(f"{p.name} tentou interromper {enemy.name}, mas não havia ação a cancelar.")
+            return
+        if view and view.uninterruptible:
+            self.add_log(f"⛔ A ação de {enemy.name} é ininterrupível!")
+            telemetry.track("combat_interrupt_fail", reason="uninterruptible")
+            return
+        bond_bonus = 0.0
+        try:
+            from engine.party_meta import interrupt_chance_bonus
+            bond_bonus = interrupt_chance_bonus(self.state)
+        except Exception:
+            pass
+        if roll_interrupt(p, enemy, bond_bonus=bond_bonus):
+            enemy.planned_action = (
+                "SKIP",
+                0,
+                [f"{enemy.name} foi interrompido por {p.name} e perdeu o ímpeto!"],
+            )
+            enemy.intent_view = build_intent_view("SKIP", enemy, interrupted=True)
+            enemy.intent_interrupted = True
+            self.add_log(f"🛑 {p.name} interrompeu {enemy.name} com sucesso!")
+            telemetry.track("combat_interrupt_success")
+            try:
+                from engine.vesper_intel import record_tactic
+                record_tactic(self.state, "interrupt")
+            except Exception:
+                pass
+            try:
+                from engine.dto import SoundEffect, VisualEffect
+                self.adapter.emit(SoundEffect("HIT_CRITICAL"))
+                self.adapter.emit(VisualEffect("shake", target_id=f"enemy_{enemy.idx}", duration=350))
+            except Exception:
+                pass
+        else:
+            self.add_log(f"{p.name} tentou interromper {enemy.name}, mas falhou!")
+            telemetry.track("combat_interrupt_fail", reason="roll")
+
     def execute_player_attack(self, p, target: Enemy):
+        # Clima Modifiers
+        weather = self.state.get_flag("weather", "Ensolarado")
+        has_lamp = any(getattr(item, 'id', '') == 'lampeao_eter' for item in getattr(self.state, 'shared_inventory', []))
+        if weather == "Nevoeiro" and not has_lamp and random.random() < 0.20:
+            self.add_log(f"{p.name} tentou atacar {target.name}, mas errou devido à névoa densa!")
+            from engine.dto import SoundEffect
+            self.adapter.emit(SoundEffect("SWOOSH!"))
+            return
+            
+        wind_active = self.state.get_flag("arena_wind_active", -1)
+        if wind_active == self.turn and random.random() < 0.20:
+            self.add_log(f"{p.name} tentou atacar {target.name}, mas errou devido à ventania impetuosa!")
+            from engine.dto import SoundEffect
+            self.adapter.emit(SoundEffect("SWOOSH!"))
+            return
+            
         base_atk = p.get_attack_power()
         raw_damage = random.randint(int(base_atk * 0.8), int(base_atk * 1.2))
         crit_chance = 0.05 + (p.agilidade * 0.015 if p.char_class == CharacterClass.LADINO else 0.005)
+        unlocked = getattr(p, "talents_unlocked", [])
+        if "guerreiro_berserker_2" in unlocked:
+            crit_chance += 0.15
+        if "guerreiro_colosso_2" in unlocked and "guerreiro_berserker_2" in unlocked:
+            crit_chance += 0.10
         is_crit = random.random() < crit_chance
         if is_crit:
             raw_damage = int(raw_damage * 1.8)
+            if "guerreiro_colosso_2" in unlocked and "guerreiro_berserker_2" in unlocked:
+                heal_amt = int(p.max_hp * 0.05)
+                p.heal(heal_amt)
+                self.add_log(f"🛡️ Juggernaut Calejado: {p.name} curou {heal_amt} HP ao desferir um golpe crítico!")
+
+        # Phase 2 Void Corruption: slight offense scaling
+        try:
+            from engine.party_meta import offense_mult
+            raw_damage = max(1, int(raw_damage * offense_mult(self.state)))
+        except Exception:
+            pass
+        # Shout buff from downed ally
+        if self.state.get_flag("shout_buff_next"):
+            raw_damage = int(raw_damage * 1.25)
+            self.state.set_flag("shout_buff_next", False)
+            self.add_log("📢 O grito de um aliado caído impulsa o golpe!")
             
         res = target.take_damage(raw_damage)
         damage_dealt = res["damage_taken"]
@@ -362,6 +594,13 @@ class CombatSystem:
         crit_str = f" [CRÍTICO]" if is_crit else ""
         self.add_log(f"{p.name} atacou {target.name}!{crit_str}")
         self.add_log(desc)
+        if p.weapon and getattr(p.weapon, "id", None):
+            try:
+                from engine.relic_attunement import record_relic_use, apply_attunement_to_weapon
+                record_relic_use(self.state, p.weapon.id, "crit" if is_crit else "use")
+                apply_attunement_to_weapon(self.state, p.weapon)
+            except Exception:
+                pass
 
 
     def get_first_alive_enemy(self) -> Enemy:
@@ -418,6 +657,13 @@ class CombatSystem:
             target.status_effects[StatusEffect.AFOGAMENTO] -= 1
             if target.status_effects[StatusEffect.AFOGAMENTO] <= 0:
                 effects_to_remove.append(StatusEffect.AFOGAMENTO)
+
+        # Fúria: expire over turns; value >= 99 = permanent (e.g. boss ogre)
+        if StatusEffect.FURIA in target.status_effects:
+            if target.status_effects[StatusEffect.FURIA] < 99:
+                target.status_effects[StatusEffect.FURIA] -= 1
+                if target.status_effects[StatusEffect.FURIA] <= 0:
+                    effects_to_remove.append(StatusEffect.FURIA)
                 
         for effect in effects_to_remove:
             del target.status_effects[effect]
@@ -461,9 +707,31 @@ class CombatSystem:
             was_down = p_id in getattr(self, '_downed_players_cache', set())
             is_currently_down = p.hp <= 0
             if is_currently_down and not was_down:
+                # Phase 2 Mercy bond: one free stay-at-1-HP per combat
+                revived = False
+                try:
+                    from engine.party_meta import try_mercy_revive
+                    revived = try_mercy_revive(self.state, p)
+                except Exception:
+                    revived = False
+                if revived:
+                    self._downed_players_cache.discard(p_id)
+                    from engine.dto import SoundEffect
+                    self.adapter.emit(SoundEffect("revive"))
+                    continue
+
                 self._downed_players_cache.add(p_id)
                 from engine.dto import SoundEffect
                 self.adapter.emit(SoundEffect("party_member_down"))
+                # If the engine leader fell, try to retarget world.player to a living member
+                if p is self.player:
+                    alive = next((x for x in party if x.hp > 0), None)
+                    if alive:
+                        companion = getattr(self.player, "companion", None)
+                        self.player = alive
+                        self.state.player = alive
+                        if companion and not getattr(alive, "companion", None):
+                            alive.companion = companion
             elif not is_currently_down and was_down:
                 self._downed_players_cache.discard(p_id)
                 from engine.dto import SoundEffect
@@ -509,14 +777,39 @@ class CombatSystem:
                 continue
                 
             target_player = self.select_enemy_target(enemy)
-            action_type, val, logs = enemy.select_action(target_player, self.enemies)
+            planned = getattr(enemy, "planned_action", None)
+            if FLAGS.combat_intent and planned is not None:
+                action_type, val, logs = planned
+            else:
+                action_type, val, logs = enemy.select_action(target_player, self)
+            # Clear plan after consumption
+            enemy.planned_action = None
+
             for log in logs:
                 self.add_log(log)
+
+            if action_type == "SKIP":
+                continue
                 
             if action_type in ["ATTACK", "ATTACK_DRAIN"]:
+                # Night-time Boss/Shadow damage boost
+                time_of_day = self.state.get_flag("time_of_day", "Dia")
+                is_boss = "boss" in str(enemy.ai_type).lower()
+                is_shadow = "sombra" in enemy.name.lower() or "espectro" in enemy.name.lower() or "sombrio" in enemy.name.lower()
+                if time_of_day == "Noite" and (is_boss or is_shadow):
+                    val = int(val * 1.2)
+                    self.add_log(f"🌙 O poder da noite fortalece o ataque de {enemy.name}!")
+                    
+                # Phase 2: corruption can slightly increase damage taken
+                try:
+                    from engine.party_meta import damage_taken_mult
+                    val = max(1, int(val * damage_taken_mult(self.state)))
+                except Exception:
+                    pass
                 res = target_player.take_damage(val)
                 if res["dodge"]:
                     self.add_log(f"{target_player.name} se esquivou do ataque de {enemy.name}!")
+
                 else:
                     from engine.dto import VisualEffect
                     target_id = getattr(target_player, 'client_id', 'leader')
@@ -543,6 +836,7 @@ class CombatSystem:
             elif action_type == "SUMMON":
                 new_minion = spawn_enemy("cultista_flamejante")
                 if new_minion:
+                    new_minion.idx = len(self.enemies)
                     self.enemies.append(new_minion)
                     self.add_log(f"Um {new_minion.name} se junta à luta!")
                     
@@ -555,6 +849,9 @@ class CombatSystem:
                 self.check_victory_defeat_or_transformation()
                 if self.is_finished():
                     return
+            elif action_type == "DEFEND":
+                enemy.defending = True
+                # logs already emitted from plan
 
     def companion_action(self):
         alive_enemies = [e for e in self.enemies if e.is_alive()]
@@ -573,23 +870,43 @@ class CombatSystem:
         total_xp = sum(e.xp_reward for e in eligible_enemies)
         total_gold = sum(e.gold_reward for e in eligible_enemies)
         self.rewards["gold"] = total_gold
-        self.player.gold += total_gold
-        
-        xp_logs = self.player.gain_xp(total_xp)
-        self.add_log(f"Ouro ganho: {total_gold}g")
-        for log in xp_logs:
-            self.add_log(log)
-            
         self.rewards["xp"] = total_xp
+
+        party = list(getattr(self.state, 'party', None) or [self.player])
+        # Prefer living members; fall back to full party so someone always gets rewards
+        recipients = [p for p in party if p.hp > 0] or party or [self.player]
+        n = max(1, len(recipients))
+
+        # Full XP to each party member (co-op), gold split evenly
+        gold_each = total_gold // n
+        gold_remainder = total_gold - (gold_each * n)
+        self.add_log(f"Ouro ganho: {total_gold}g (dividido entre {n})")
+        for i, p in enumerate(recipients):
+            share = gold_each + (gold_remainder if i == 0 else 0)
+            p.gold += share
+            for log in p.gain_xp(total_xp):
+                # Prefix non-leader logs so multi-player level-ups are clear
+                if p is not self.player and log:
+                    self.add_log(f"[{p.name}] {log}")
+                else:
+                    self.add_log(log)
         
         for enemy in eligible_enemies:
             chance = 1.0 if "Ogro" in enemy.name or "Inquisidor" in enemy.name or "Malakar" in enemy.name else 0.45
             if random.random() < chance:
-                item = get_random_loot(self.player.level)
+                ref_level = max(p.level for p in recipients)
+                item = get_random_loot(ref_level)
                 if item:
                     self.rewards["loot"].append(item)
                     self.add_log(f"Loot Encontrado: {item.name}")
-                    self.player.inventory.append(item)
+                    # Consumables go to shared stock via InventoryList; gear to a random recipient
+                    if isinstance(item, Consumable):
+                        if hasattr(self.state, "shared_inventory"):
+                            self.state.shared_inventory.append(item)
+                        else:
+                            recipients[0].inventory.append(item)
+                    else:
+                        random.choice(recipients).inventory.append(item)
 
     def run(self) -> Union[bool, str]:
         from engine.combat_ui import CombatUI

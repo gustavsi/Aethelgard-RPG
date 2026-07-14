@@ -167,7 +167,7 @@ def run_variation(variation_name: str, leader_class: str, member_class: str, rec
                                 val = "6" # Travel to Whisper Caves
                             elif is_ready_prompt:
                                 if not interacted_forge_a:
-                                    val = "4" # Visitar a Forja
+                                    val = "forge" # Visitar a Forja
                                 else:
                                     if not sent_ready_a and "Estou pronto para partir" in str(options):
                                         val = "1"
@@ -228,9 +228,9 @@ def run_variation(variation_name: str, leader_class: str, member_class: str, rec
                                 pass
                             elif is_ready_prompt:
                                 if not interacted_elder_b:
-                                    val = "6" # Speak to Elder Alistair
+                                    val = "elder" # Speak to Elder Alistair
                                 elif recruit_elena and not interacted_tavern_b:
-                                    val = "5" # Visitar a Taverna
+                                    val = "tavern" # Visitar a Taverna
                                 else:
                                     if not sent_ready_b and "Estou pronto para partir" in str(options):
                                         val = "1"

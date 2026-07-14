@@ -86,6 +86,33 @@ class YsoldeCompanion(Companion):
             
         play_sound_effect("GRAPPLE PULL", Colors.CYAN)
 
+class UlfgarCompanion(Companion):
+    def __init__(self):
+        super().__init__("Ulfgar", "Caçador experiente do norte, mestre em tiros de precisão gélidos.")
+
+    def act(self, player, enemies, add_log_func):
+        alive_enemies = [e for e in enemies if e.is_alive()]
+        if not alive_enemies:
+            return
+            
+        target = random.choice(alive_enemies)
+        dmg = 16 + player.level * 3
+        res = target.take_damage(dmg)
+        damage_dealt = res["damage_taken"]
+        desc = f"Causou {damage_dealt} de dano em {target.name}."
+        if res.get("mitigated"):
+            desc += " (Mitigado por defesa ativa!)"
+        add_log_func(f"Ulfgar faz um disparo de precisão com flecha congelante em {target.name}!")
+        add_log_func(desc)
+        
+        # 30% chance to freeze/stun
+        if random.random() < 0.30:
+            from engine.constants import StatusEffect
+            target.status_effects[StatusEffect.ATORDOADO] = 1
+            add_log_func(f"❄️ O frio da flecha congelou e deixou {target.name} Atordoado por 1 turno!")
+            
+        play_sound_effect("ARROW WHOOSH", Colors.CYAN)
+
 def get_companion(companion_id: str) -> Companion:
     if companion_id == "elena":
         return ElenaCompanion()
@@ -93,4 +120,6 @@ def get_companion(companion_id: str) -> Companion:
         return DroggCompanion()
     elif companion_id == "ysolde":
         return YsoldeCompanion()
+    elif companion_id == "ulfgar":
+        return UlfgarCompanion()
     return None

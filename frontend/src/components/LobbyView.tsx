@@ -16,8 +16,10 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ lobbyCode, isCreator }) =>
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const [gameMode, setGameMode] = useState<'campanha' | 'arena'>('campanha');
+
   const handleStartGame = () => {
-    sendAction({ action: "START_GAME" });
+    sendAction({ action: "START_GAME", mode: gameMode });
   };
 
   const getEmojiForClass = (charClass: string) => {
@@ -131,13 +133,42 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ lobbyCode, isCreator }) =>
         {/* Start Button / Status Display */}
         <div className="border-t border-gray-800/60 pt-6 flex flex-col items-center">
           {isCreator ? (
-            <div className="w-full flex flex-col items-center gap-3">
+            <div className="w-full flex flex-col items-center gap-4">
+              <div className="flex gap-4 w-full mb-2">
+                <button
+                  type="button"
+                  onClick={() => setGameMode('campanha')}
+                  className={`flex-1 py-3 px-4 rounded border text-xs tracking-widest font-bold font-cinzel transition-all duration-300 ${
+                    gameMode === 'campanha'
+                      ? 'bg-yellow-600/10 border-yellow-500 text-yellow-400 shadow-[0_0_15px_rgba(234,179,8,0.1)]'
+                      : 'bg-transparent border-gray-800 text-gray-400 hover:border-gray-750'
+                  }`}
+                >
+                  🏰 MODO CAMPANHA
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGameMode('arena')}
+                  className={`flex-1 py-3 px-4 rounded border text-xs tracking-widest font-bold font-cinzel transition-all duration-300 ${
+                    gameMode === 'arena'
+                      ? 'bg-purple-650/10 border-purple-500 text-purple-400 shadow-[0_0_15px_rgba(168,85,247,0.1)]'
+                      : 'bg-transparent border-gray-800 text-gray-400 hover:border-gray-750'
+                  }`}
+                >
+                  💀 MODO ARENA
+                </button>
+              </div>
+
               <button
                 onClick={handleStartGame}
                 disabled={!connected || players.length < 1}
-                className="w-full py-4 bg-yellow-600 hover:bg-yellow-500 disabled:opacity-50 text-black font-cinzel font-bold tracking-widest text-sm rounded shadow-[0_0_20px_rgba(234,179,8,0.15)] hover:shadow-[0_0_30px_rgba(234,179,8,0.25)] transition-all duration-300"
+                className={`w-full py-4 disabled:opacity-50 text-black font-cinzel font-bold tracking-widest text-sm rounded transition-all duration-300 ${
+                  gameMode === 'arena'
+                    ? 'bg-purple-600 hover:bg-purple-500 shadow-[0_0_20px_rgba(168,85,247,0.15)] hover:shadow-[0_0_30px_rgba(168,85,247,0.25)]'
+                    : 'bg-yellow-600 hover:bg-yellow-500 shadow-[0_0_20px_rgba(234,179,8,0.15)] hover:shadow-[0_0_30px_rgba(234,179,8,0.25)]'
+                }`}
               >
-                🚀 INICIAR AVENTURA
+                🚀 INICIAR {gameMode === 'arena' ? 'ARENA ROGUELIKE' : 'AVENTURA'}
               </button>
               <p className="text-xs text-gray-500 italic text-center">
                 Apenas você (Líder da party) pode dar início à jornada.

@@ -1,14 +1,31 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
 
+export type VfxType =
+  | 'shake'
+  | 'flash'
+  | 'particles'
+  | 'text'
+  | 'enemy_intro'
+  | 'projectile'
+  | 'heal_glow'
+  | 'impact'
+  | 'damage_number'
+  | 'heal_number'
+  | 'screen_flash'
+  | 'lightning'
+  | 'crit_burst';
+
 export interface VisualEffect {
   id: string;
-  type: 'shake' | 'flash' | 'particles' | 'text' | 'enemy_intro' | 'projectile' | 'heal_glow';
+  type: VfxType;
   targetId: string;
   color?: string;
   duration: number;
   text?: string;
   fromSide?: 'party' | 'enemy';
-  projectileStyle?: 'fireball' | 'arrow' | 'slash' | 'holy_bolt';
+  projectileStyle?: 'fireball' | 'arrow' | 'slash' | 'holy_bolt' | string;
+  amount?: number;
+  isCrit?: boolean;
 }
 
 interface VisualEffectContextProps {
@@ -27,10 +44,10 @@ export const VisualEffectProvider: React.FC<{ children: React.ReactNode }> = ({ 
     const newEffect = { ...effect, id };
     setEffects((prev) => [...prev, newEffect]);
 
-    // Auto-cleanup
+    const duration = Math.max(100, effect.duration || 800);
     setTimeout(() => {
       setEffects((prev) => prev.filter((e) => e.id !== id));
-    }, effect.duration);
+    }, duration);
   }, []);
 
   const removeEffect = useCallback((id: string) => {

@@ -177,9 +177,9 @@ class Chapter8Mixin:
         typewriter("Brokk: \"Uma verdadeira obra-prima! Que ela guie seus passos contra as trevas.\"", 0.03)
         press_any_key()
         
-        # Credits / Epílogo
-        press_any_key("Pressione [ENTER] para ver os créditos...")
-        self.credits()
+        # Transição para o Capítulo 9
+        press_any_key("Pressione [ENTER] para viajar para o Gélido Silêncio...")
+        self.chapter_9_start()
 
     def legendary_draft_flow(self, item_id: str):
         self.state.set_flag("legendary_draft_item", item_id)

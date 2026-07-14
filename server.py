@@ -15,12 +15,13 @@ from engine.world import WorldManager
 from engine.player import Player
 from engine.constants import CharacterClass
 from engine.adapter import UIAdapter, WebUIAdapter
-from engine.dto import ChoiceRequested, PressAnyKey, NarrativeText, ClearScreen, SoundEffect, AsciiArt
+from engine.dto import ChoiceRequested, PressAnyKey, NarrativeText, ClearScreen, SoundEffect, AsciiArt, VisualEffect
 from engine.exceptions import EngineShutdownException, GameOverException
-from engine.save_system import load_game, get_save_path
+from engine.save_system import load_game, get_save_path, merge_lobby_party_with_save
 from engine.utils import strip_ansi
 from engine.combat import CombatPhase, Command
 from engine.items import Weapon, Armor, Consumable
+import engine.menu_manager as menu_mgr
 
 app = FastAPI()
 
@@ -134,7 +135,13 @@ class MulticastWebUIAdapter(WebUIAdapter):
             payload["content"] = strip_ansi(payload["content"])
             self.broadcast(payload)
             return None
-        # AsciiArt, SoundEffect, ClearScreen ignorados na web
+        elif isinstance(event, SoundEffect):
+            self.broadcast(event.to_dict())
+            return None
+        elif isinstance(event, VisualEffect):
+            self.broadcast(event.to_dict())
+            return None
+        # AsciiArt / ClearScreen: web client ignores (uses images + no terminal clear)
         return None
 
     def collect_all_votes(self, session_id: str) -> dict:
@@ -213,7 +220,11 @@ def run_engine_thread(world: WorldManager, adapter: WebUIAdapter, output_queue: 
     try:
         # Initial trigger
         adapter.ws_callback({"type": "STATE_UPDATE", "state": world.state.to_dict()})
-        world.run_game()
+        if world.state.get_flag("is_arena"):
+            from engine.arena import run_arena_loop
+            run_arena_loop(world, adapter)
+        else:
+            world.run_game()
         adapter.ws_callback({"type": "GAME_OVER", "message": "Fim de jogo."})
     except EngineShutdownException:
         logger.info("Engine thread shutting down gracefully.")
@@ -294,13 +305,35 @@ def handle_broadcast_payload(session, payload):
             world = session.get("world")
             combat = getattr(world, 'active_combat', None) if world else None
             if combat:
+                from engine.constants import StatusEffect
+                sync_engine_leader(session, world)
                 for target_id, (target_ws, _, _) in list(session["connected_clients"].items()):
                     if target_id in combat.pending_actions:
                         continue
+                    player = next((p for p in world.party if getattr(p, 'client_id', None) == target_id), None)
+                    # Stunned living players skip; downed get limited menu (PRD B4)
+                    if player and player.hp > 0 and StatusEffect.ATORDOADO in player.status_effects:
+                        continue
+                    if player and player.hp <= 0:
+                        from engine.feature_flags import FLAGS as _FF
+                        if not _FF.content_systems:
+                            continue
+                        if target_id not in combat.client_menu_stages:
+                            from engine.downed_roles import downed_menu_options
+                            opts = downed_menu_options(world.state)
+                            combat.client_menu_stages[target_id] = "downed"
+                            send_to_ws_threadsafe(session, target_ws, {
+                                "type": "WAITING_INPUT",
+                                "prompt": f"{player.name} está caído. O que fazer?",
+                                "options": opts,
+                                "my_client_id": target_id,
+                                "leader_client_id": get_actual_leader_id(session, world),
+                            })
+                        continue
                     
                     if target_id not in combat.client_menu_stages:
+                        from engine.feature_flags import FLAGS as _FF
                         options = {"1": "Atacar"}
-                        player = next((p for p in world.party if getattr(p, 'client_id', None) == target_id), None)
                         if player:
                             skills = player.get_skills()
                             if skills:
@@ -308,6 +341,8 @@ def handle_broadcast_payload(session, payload):
                         options["4"] = "Defender"
                         if combat.can_flee:
                             options["5"] = "Fugir"
+                        if _FF.combat_intent:
+                            options["6"] = "🛑 Interromper"
                             
                         combat.client_menu_stages[target_id] = "main"
                         
@@ -316,7 +351,7 @@ def handle_broadcast_payload(session, payload):
                             "prompt": "O que deseja fazer?",
                             "options": options,
                             "my_client_id": target_id,
-                            "leader_client_id": session["leader_id"]
+                            "leader_client_id": get_actual_leader_id(session, world)
                         }
                         send_to_ws_threadsafe(session, target_ws, input_payload)
     elif payload.get("type") == "WAITING_INPUT":
@@ -324,13 +359,17 @@ def handle_broadcast_payload(session, payload):
     elif payload.get("type") == "COMBAT_MOMENT":
         session["adapter"].last_waiting_input = payload
     elif payload.get("type") == "NARRATIVE_TEXT":
-        session.setdefault("narrative_log", []).append(payload["content"])
+        log = session.setdefault("narrative_log", [])
+        log.append(payload["content"])
+        if len(log) > NARRATIVE_LOG_MAX:
+            session["narrative_log"] = log[-NARRATIVE_LOG_MAX:]
 
 def refresh_client_ui(session, client_id, world):
     combat = getattr(world, 'active_combat', None) if world else None
     if combat and combat.phase == CombatPhase.WAITING_ALL_PLAYERS:
         stage = combat.client_menu_stages.get(client_id, "main")
         if stage == "main":
+            from engine.feature_flags import FLAGS as _FF
             options = {"1": "Atacar"}
             player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
             if player:
@@ -340,6 +379,8 @@ def refresh_client_ui(session, client_id, world):
             options["4"] = "Defender"
             if combat.can_flee:
                 options["5"] = "Fugir"
+            if _FF.combat_intent:
+                options["6"] = "🛑 Interromper"
             
             payload = {
                 "type": "WAITING_INPUT",
@@ -383,6 +424,8 @@ def refresh_client_ui(session, client_id, world):
             if client_id in session["connected_clients"]:
                 ws = session["connected_clients"][client_id][0]
                 send_to_ws_threadsafe(session, ws, payload)
+        elif stage == "talents":
+            send_talents_menu(session, client_id, world)
         elif stage == "party_stock":
             player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
             if not player:
@@ -428,13 +471,61 @@ def set_client_stage(session, client_id, world, stage):
         name_key = player.name.lower() if player else "herói"
         session.setdefault("ready_players", set()).discard(name_key)
 
+def exit_client_submenu(session, client_id, world):
+    """Return client to hub/ready UI after leaving a sub-menu (inventory, forge, etc.)."""
+    session.setdefault("client_stages", {})[client_id] = "normal"
+    refresh_client_ui(session, client_id, world)
+    # Explicit re-send: if still waiting for ready, ensure prompt is not blank
+    if session.get("waiting_for_ready", False):
+        send_player_ready_prompt(session, client_id, world)
+
+def sync_engine_leader(session, world):
+    """Keep world.player / state.player aligned with the living actual leader (Bug #3)."""
+    if not world or not getattr(world, "party", None):
+        return
+    actual_id = get_actual_leader_id(session, world)
+    new_leader = next(
+        (p for p in world.party if getattr(p, "client_id", None) == actual_id
+         or (actual_id == "leader" and getattr(p, "client_id", None) is None)),
+        None,
+    )
+    if not new_leader or new_leader is world.player:
+        return
+    # Move party companion to the active leader so narrative/combat still use it
+    old = world.player
+    companion = getattr(old, "companion", None)
+    if companion and not getattr(new_leader, "companion", None):
+        new_leader.companion = companion
+        old.companion = None
+    world.player = new_leader
+    if world.state:
+        world.state.player = new_leader
+
+def migrate_combat_client_id(world, old_id, new_id):
+    """Remap pending combat actions/menus when a player reconnects with a new UUID (Bug #4)."""
+    if not world or not old_id or old_id == new_id:
+        return
+    combat = getattr(world, "active_combat", None)
+    if not combat:
+        return
+    if old_id in combat.pending_actions:
+        combat.pending_actions[new_id] = combat.pending_actions.pop(old_id)
+    if old_id in combat.client_menu_stages:
+        combat.client_menu_stages[new_id] = combat.client_menu_stages.pop(old_id)
+    cache = getattr(combat, "_downed_players_cache", None)
+    if cache is not None and old_id in cache:
+        cache.discard(old_id)
+        cache.add(new_id)
+
+NARRATIVE_LOG_MAX = 100
+
 def send_player_ready_prompt(session, client_id, world):
     if not world or not world.state:
         return
     if not session.get("waiting_for_ready", False):
         return
     stage = session.setdefault("client_stages", {}).get(client_id, "normal")
-    if stage in ["inventory", "party_stock", "forge", "tavern", "elder", "elena_dialogue", "elena_dialogue_relic", "elder_recompensa", "legendary_draft", "voting"]:
+    if stage in ["inventory", "party_stock", "talents", "forge", "tavern", "elder", "elena_dialogue", "elena_dialogue_relic", "elder_recompensa", "legendary_draft", "voting"]:
         return
     actual_leader = get_actual_leader_id(session, world)
     
@@ -458,18 +549,21 @@ def send_player_ready_prompt(session, client_id, world):
         "3": "🧪 Estoque da Party"
     }
     
+    # Semantic keys (forge/tavern/elder) — must NOT use "4"/"5"/"6".
+    # Those numeric keys are reserved for the engine Oakhaven leader menu
+    # (where "6" = travel to Whispering Caves). Colliding them blocked story progress.
     if loc == "oakhaven":
-        options["4"] = "⚒️ Visitar a Forja de Garrett"
-        options["5"] = "🍺 Visitar a Taverna do Javali Saltitante"
-        options["6"] = "📜 Falar com o Ancião Alistair"
+        options["forge"] = "⚒️ Visitar a Forja de Garrett"
+        options["tavern"] = "🍺 Visitar a Taverna do Javali Saltitante"
+        options["elder"] = "📜 Falar com o Ancião Alistair"
     elif loc == "vaelmoor":
-        options["4"] = "⚓ Visitar o Estaleiro de Vaelmoor"
-        options["5"] = "🍺 Visitar a Taverna da Sereia Bêbada"
-        options["6"] = "⚓ Falar com a Capitã Ysolde"
+        options["forge"] = "⚓ Visitar o Estaleiro de Vaelmoor"
+        options["tavern"] = "🍺 Visitar a Taverna da Sereia Bêbada"
+        options["elder"] = "⚓ Falar com a Capitã Ysolde"
     elif loc == "kragmoor":
-        options["4"] = "⚒️ Visitar a Forja Rúnica de Brokk"
-        options["5"] = "🍺 Visitar a Taverna Subterrânea"
-        options["6"] = "⚒️ Falar com o Ferreiro Brokk"
+        options["forge"] = "⚒️ Visitar a Forja Rúnica de Brokk"
+        options["tavern"] = "🍺 Visitar a Taverna Subterrânea"
+        options["elder"] = "⚒️ Falar com o Ferreiro Brokk"
         
     payload = {
         "type": "WAITING_INPUT",
@@ -483,168 +577,54 @@ def send_player_ready_prompt(session, client_id, world):
         send_to_ws_threadsafe(session, ws, payload)
 
 def send_forge_menu(session, client_id, world):
-    player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
-    if not player:
-        player = world.player
+    player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None) or world.player
     loc = world.state.current_location if world else "oakhaven"
-    
-    if loc == "vaelmoor":
-        options = {
-            "1": "Comprar Espada de Aço de Vaelmoor (60g) (+18 ATK)",
-            "2": "Comprar Armadura do Corsário (90g) (+15 DEF)",
-            "exit": "Voltar para o Porto"
-        }
-        prompt = f"⚓ Estaleiro de Vaelmoor - Seu Ouro: {player.gold}g"
-    elif loc == "kragmoor":
-        options = {
-            "1": "Comprar Martelo de Guerra de Kragmoor (120g) (+25 ATK)",
-            "2": "Comprar Armadura de Placas de Kragmoor (150g) (+22 DEF)",
-            "exit": "Voltar para as Minas"
-        }
-        prompt = f"⚒️ Forja Rúnica de Brokk - Seu Ouro: {player.gold}g"
-    else:
-        options = {
-            "1": "Comprar Espada de Soldado (30g) (+10 ATK)",
-            "2": "Comprar Cota de Malha (50g) (+8 DEF)",
-            "exit": "Voltar para a Vila"
-        }
-        prompt = f"⚒️ Forja de Garrett - Seu Ouro: {player.gold}g"
-        
-    payload = {
-        "type": "WAITING_INPUT",
-        "prompt": prompt,
-        "options": options,
-        "my_client_id": client_id,
-        "leader_client_id": get_actual_leader_id(session, world)
-    }
+    leader_id = get_actual_leader_id(session, world)
+    payload = menu_mgr.get_forge_menu(player, loc, client_id, leader_id)
+    if client_id in session["connected_clients"]:
+        ws = session["connected_clients"][client_id][0]
+        send_to_ws_threadsafe(session, ws, payload)
+
+def send_talents_menu(session, client_id, world):
+    player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None) or world.player
+    leader_id = get_actual_leader_id(session, world)
+    payload, idx_to_talent = menu_mgr.get_talents_menu(player, client_id, leader_id)
+    session.setdefault("client_talent_maps", {})[client_id] = idx_to_talent
+    set_client_stage(session, client_id, world, "talents")
     if client_id in session["connected_clients"]:
         ws = session["connected_clients"][client_id][0]
         send_to_ws_threadsafe(session, ws, payload)
 
 def send_tavern_menu(session, client_id, world):
-    player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
-    if not player:
-        player = world.player
-    options = {}
+    player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None) or world.player
     loc = world.state.current_location if world else "oakhaven"
-    
-    if loc == "oakhaven":
-        elena_confronted = world.state.get_flag("elena_confronted")
-        elena_recrutada = world.state.get_flag("elena_recrutada")
-        if not elena_recrutada and not elena_confronted:
-            options["1"] = "Falar com Elena (Arqueira)"
-        options.update({
-            "2": "Comprar Poção de Vida Menor (5g) - Cura 25 HP",
-            "3": "Comprar Poção de Mana Menor (5g) - Restaura 15 MP",
-            "4": "Comprar Poção de Vida (15g) - Cura 60 HP",
-            "exit": "Voltar para a Vila"
-        })
-        prompt = f"🍺 Taverna do Javali Saltitante - Seu Ouro: {player.gold}g"
-    elif loc == "vaelmoor":
-        options.update({
-            "2": "Comprar Poção de Vida (15g) - Cura 60 HP",
-            "3": "Comprar Poção de Mana (15g) - Restaura 40 MP",
-            "4": "Comprar Poção de Vida Grande (35g) - Cura 150 HP",
-            "exit": "Voltar para o Porto"
-        })
-        prompt = f"🍺 Taverna da Sereia Bêbada - Seu Ouro: {player.gold}g"
-    elif loc == "kragmoor":
-        options.update({
-            "2": "Comprar Poção de Vida Grande (35g) - Cura 150 HP",
-            "3": "Comprar Poção de Mana Grande (40g) - Restaura 80 MP",
-            "exit": "Voltar para as Minas"
-        })
-        prompt = f"🍺 Taverna Subterrânea do Martelo de Ouro - Seu Ouro: {player.gold}g"
-        
-    payload = {
-        "type": "WAITING_INPUT",
-        "prompt": prompt,
-        "options": options,
-        "my_client_id": client_id,
-        "leader_client_id": get_actual_leader_id(session, world)
-    }
+    leader_id = get_actual_leader_id(session, world)
+    elena_confronted = world.state.get_flag("elena_confronted")
+    elena_recrutada = world.state.get_flag("elena_recrutada")
+    payload = menu_mgr.get_tavern_menu(player, loc, client_id, leader_id, elena_confronted, elena_recrutada)
     if client_id in session["connected_clients"]:
         ws = session["connected_clients"][client_id][0]
         send_to_ws_threadsafe(session, ws, payload)
 
 def send_elena_dialogue(session, client_id, world, step):
-    if step == 1:
-        prompt = "Você se aproxima de Elena. A arqueira ruiva olha friamente. 'Quem é você? O que quer?'"
-        options = {
-            "1": "\"Estou ajudando a vila investigando as cavernas. Poderia usar uma batedora talentosa.\"",
-            "2": "\"Sou apenas um viajem em busca de riquezas.\"",
-            "3": "\"Não importa. Queria apenas pagar uma bebida.\""
-        }
-    else:
-        prompt = "Elena estreita os olhos e repara na sua bolsa. 'Você fala em ajudar... mas esse brilho dourado parece muito com a relíquia sagrada da nossa cabana de culto. Você roubou nosso patrimônio?'"
-        options = {
-            "1": "\"Sim, achei que estaria mais segura comigo.\" (Honestidade)",
-            "2": "\"Não! Encontrei isso jogado na floresta.\" (Mentira)"
-        }
-    payload = {
-        "type": "WAITING_INPUT",
-        "prompt": prompt,
-        "options": options,
-        "my_client_id": client_id,
-        "leader_client_id": get_actual_leader_id(session, world)
-    }
+    leader_id = get_actual_leader_id(session, world)
+    payload = menu_mgr.get_elena_dialogue(step, client_id, leader_id)
     if client_id in session["connected_clients"]:
         ws = session["connected_clients"][client_id][0]
         send_to_ws_threadsafe(session, ws, payload)
 
 def send_elder_menu(session, client_id, world):
-    player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
-    if not player:
-        player = world.player
+    player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None) or world.player
     loc = world.state.current_location if world else "oakhaven"
-    
-    if loc == "vaelmoor":
-        prompt = "Capitã Ysolde: \"O Armazém 7 é a chave. Maré Negra e Grum estão escondendo algo terrível lá. Preparem-se bem.\""
-        options = {"exit": "Voltar para o Porto"}
-    elif loc == "kragmoor":
-        prompt = "Ferreiro Brokk: \"O Golem corrompido guarda a Forja. Se recuperarem a runa lendária, posso forjar armas incríveis para vocês!\""
-        options = {"exit": "Voltar para as Minas"}
-    else:
-        quest = player.quest_manager.quests.get("cavernas")
-        if quest and quest.is_completed:
-            prompt = "Ancião Alistair: \"Obrigado por salvar Oakhaven libertando as Cavernas Sussurrantes! Você é um verdadeiro herói!\""
-            options = {"exit": "Voltar para a Vila"}
-        elif quest and quest.is_active:
-            prompt = "Ancião Alistair: \"Como está indo a investigação das Cavernas Sussurrantes? O Inquisidor ainda ameaça a vila.\""
-            options = {"exit": "Voltar para a Vila"}
-        else:
-            prompt = "Ancião Alistair: \"Viajante, você poderia nos ajudar a investigar as Cavernas Sussurrantes ao norte? O Inquisidor das Sombras está reunindo escravos e poder lá.\""
-            options = {
-                "1": "\"Eu irei investigar as cavernas!\"",
-                "2": "\"O que eu ganho com isso?\"",
-                "3": "\"Não posso ajudar agora.\"",
-                "exit": "Voltar para a Vila"
-            }
-            
-    payload = {
-        "type": "WAITING_INPUT",
-        "prompt": prompt,
-        "options": options,
-        "my_client_id": client_id,
-        "leader_client_id": get_actual_leader_id(session, world)
-    }
+    leader_id = get_actual_leader_id(session, world)
+    payload = menu_mgr.get_elder_menu(player, loc, client_id, leader_id)
     if client_id in session["connected_clients"]:
         ws = session["connected_clients"][client_id][0]
         send_to_ws_threadsafe(session, ws, payload)
 
 def send_elder_recompensa_menu(session, client_id, world):
-    prompt = "Ancião Alistair: \"Oakhaven não é rica, mas lhe daremos acesso ao nosso tesouro secreto e 100 moedas de ouro se nos salvar.\""
-    options = {
-        "1": "\"Tudo bem, aceito a missão.\"",
-        "2": "\"Ainda assim, recuso.\""
-    }
-    payload = {
-        "type": "WAITING_INPUT",
-        "prompt": prompt,
-        "options": options,
-        "my_client_id": client_id,
-        "leader_client_id": get_actual_leader_id(session, world)
-    }
+    leader_id = get_actual_leader_id(session, world)
+    payload = menu_mgr.get_elder_recompensa_menu(client_id, leader_id)
     if client_id in session["connected_clients"]:
         ws = session["connected_clients"][client_id][0]
         send_to_ws_threadsafe(session, ws, payload)
@@ -854,22 +834,29 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
         if world:
             for p in world.party:
                 if p.name.lower() == name.lower():
+                    old_cid = getattr(p, "client_id", None)
                     logger.info(f"Player {p.name} reconnected. Updating client_id to {client_id}")
+                    migrate_combat_client_id(world, old_cid, client_id)
                     p.client_id = client_id
-            if world.player.name.lower() == name.lower():
+            if world.player and world.player.name.lower() == name.lower():
                 logger.info(f"Leader reconnected. Updating leader_id to {client_id}")
                 session["leader_id"] = client_id
+            sync_engine_leader(session, world)
             
         adapter = session["adapter"]
         if adapter:
             if getattr(adapter, "last_state", None):
                 await websocket.send_json(adapter.last_state)
-            for text in session.get("narrative_log", []):
+            # Only replay a capped tail of narrative (Bug #13)
+            for text in session.get("narrative_log", [])[-NARRATIVE_LOG_MAX:]:
                 await websocket.send_json({"type": "NARRATIVE_TEXT", "content": text})
             
-            if session.get("waiting_for_ready", False):
+            combat = getattr(world, "active_combat", None) if world else None
+            if combat and combat.phase == CombatPhase.WAITING_ALL_PLAYERS:
+                refresh_client_ui(session, client_id, world)
+            elif session.get("waiting_for_ready", False):
                 send_player_ready_prompt(session, client_id, world)
-            elif client_id == session["leader_id"]:
+            elif client_id == get_actual_leader_id(session, world):
                 if getattr(adapter, "last_waiting_input", None):
                     await websocket.send_json(adapter.last_waiting_input)
             else:
@@ -971,14 +958,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                         if session["session_type"] == "load":
                             loaded_state = load_game(session_id)
                             if loaded_state:
-                                world = WorldManager(loaded_state, adapter=adapter, party=party_players)
+                                # Restore saved stats onto lobby shells (Bug #5/#6)
+                                merge_lobby_party_with_save(loaded_state, party_players)
+                                world = WorldManager(loaded_state, adapter=adapter, party=loaded_state.party)
+                                # Re-point leader after merge
+                                leader_player = loaded_state.player
                             else:
                                 world = WorldManager(leader_player, adapter=adapter, party=party_players)
                         else:
                             world = WorldManager(leader_player, adapter=adapter, party=party_players)
                         world.state.session_id = session_id
                         world.state.migrate_party_consumables()
+                        if parsed.get("mode") == "arena":
+                            world.state.set_flag("is_arena", True)
                         session["world"] = world
+                        sync_engine_leader(session, world)
                         
                         # Send GAME_START screen transition to everyone
                         for target_id, (target_ws, _, _) in list(session["connected_clients"].items()):
@@ -1001,6 +995,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                 if session["game_started"]:
                     world = session.get("world")
                     combat = getattr(world, 'active_combat', None) if world else None
+                    if world:
+                        sync_engine_leader(session, world)
                     action = parsed.get("action", "")
                     value = parsed.get("value", "")
                     user_input = parsed.get("value", "")
@@ -1097,15 +1093,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                             }
                             send_to_ws_threadsafe(session, websocket, payload)
                             continue
-                        elif value == "4" and world.state.current_location == "oakhaven":
+                        elif value == "forge" and world.state.current_location == "oakhaven":
                             set_client_stage(session, client_id, world, "forge")
                             send_forge_menu(session, client_id, world)
                             continue
-                        elif value == "5" and world.state.current_location == "oakhaven":
+                        elif value == "tavern" and world.state.current_location == "oakhaven":
                             set_client_stage(session, client_id, world, "tavern")
                             send_tavern_menu(session, client_id, world)
                             continue
-                        elif value == "6" and world.state.current_location == "oakhaven":
+                        elif value == "elder" and world.state.current_location == "oakhaven":
                             set_client_stage(session, client_id, world, "elder")
                             send_elder_menu(session, client_id, world)
                             continue
@@ -1137,14 +1133,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                             for cid in list(session["connected_clients"].keys()):
                                 old_stage = session.setdefault("client_stages", {}).get(cid, "normal")
                                 session["client_stages"][cid] = "normal"
-                                if old_stage in ["forge", "tavern", "elder", "inventory", "party_stock"]:
+                                if old_stage in ["forge", "tavern", "elder", "inventory", "party_stock", "talents"]:
                                     target_ws = session["connected_clients"][cid][0]
                                     shop_names = {
                                         "forge": "da forja",
                                         "tavern": "da taverna",
                                         "elder": "do ancião",
                                         "inventory": "do seu inventário",
-                                        "party_stock": "do estoque da party"
+                                        "party_stock": "do estoque da party",
+                                        "talents": "da árvore de talentos"
                                     }
                                     shop_name = shop_names.get(old_stage, "do menu")
                                     send_to_ws_threadsafe(session, target_ws, {
@@ -1214,10 +1211,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                         send_to_ws_threadsafe(session, websocket, payload)
                         continue
 
+                    if action == "OPEN_TALENTS" or (client_id != get_actual_leader_id(session, world) and not (combat and combat.phase == CombatPhase.WAITING_ALL_PLAYERS) and value == "7" and session.setdefault("client_stages", {}).get(client_id, "normal") == "normal"):
+                        send_talents_menu(session, client_id, world)
+                        continue
+
                     if session["client_stages"].get(client_id) == "inventory":
                         if value == "exit":
-                            session["client_stages"][client_id] = "normal"
-                            refresh_client_ui(session, client_id, world)
+                            exit_client_submenu(session, client_id, world)
                         else:
                             try:
                                 idx = int(value)
@@ -1279,8 +1279,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
 
                     if session["client_stages"].get(client_id) == "party_stock":
                         if value == "exit":
-                            session["client_stages"][client_id] = "normal"
-                            refresh_client_ui(session, client_id, world)
+                            exit_client_submenu(session, client_id, world)
                         else:
                             try:
                                 idx = int(value)
@@ -1336,6 +1335,47 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                             send_to_ws_threadsafe(session, websocket, payload)
                         continue
                      
+                    if session["client_stages"].get(client_id) == "talents":
+                        if value == "exit":
+                            exit_client_submenu(session, client_id, world)
+                        else:
+                            try:
+                                idx_map = session.get("client_talent_maps", {}).get(client_id, {})
+                                talent_id = idx_map.get(value)
+                                player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
+                                if not player:
+                                    player = world.player
+                                
+                                if talent_id:
+                                    from engine.talents import unlock_talent, TALENTS_LIBRARY
+                                    talent = TALENTS_LIBRARY[talent_id]
+                                    if talent_id in player.talents_unlocked:
+                                        send_to_ws_threadsafe(session, websocket, {
+                                            "type": "NARRATIVE_TEXT",
+                                            "content": f"⚠️ Você já desbloqueou o talento: {talent['name']}."
+                                        })
+                                    elif player.talent_points < 1:
+                                        send_to_ws_threadsafe(session, websocket, {
+                                            "type": "NARRATIVE_TEXT",
+                                            "content": "❌ Você não possui Pontos de Talento suficientes!"
+                                        })
+                                    else:
+                                        success = unlock_talent(player, talent_id)
+                                        if success:
+                                            session["adapter"].emit(NarrativeText(f"🌳 {player.name} desbloqueou o talento: {talent['name']}!"))
+                                            session["adapter"].on_state_change(world.state)
+                                        else:
+                                            send_to_ws_threadsafe(session, websocket, {
+                                                "type": "NARRATIVE_TEXT",
+                                                "content": "❌ Falha ao desbloquear o talento."
+                                            })
+                            except Exception as e:
+                                logger.error(f"Error unlocking talent: {e}")
+                            
+                            # Re-send talents menu to show updated status
+                            send_talents_menu(session, client_id, world)
+                        continue
+
                     if session["client_stages"].get(client_id) == "item_target":
                         pending = session.setdefault("item_target_pending", {}).get(client_id)
                         if value == "exit" or not pending:
@@ -1373,14 +1413,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                     current_stage = session["client_stages"].get(client_id)
                     if current_stage in ["forge", "tavern", "elena_dialogue", "elena_dialogue_relic", "elder", "elder_recompensa"]:
                         if not (world and world.state and world.state.current_location == "oakhaven" and session.get("waiting_for_ready", False)):
-                            set_client_stage(session, client_id, world, "normal")
-                            refresh_client_ui(session, client_id, world)
+                            exit_client_submenu(session, client_id, world)
                             continue
                             
                     if session["client_stages"].get(client_id) == "forge":
                         if value == "exit":
-                            session["client_stages"][client_id] = "normal"
-                            refresh_client_ui(session, client_id, world)
+                            exit_client_submenu(session, client_id, world)
                         else:
                             player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
                             if not player:
@@ -1404,8 +1442,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
 
                     if session["client_stages"].get(client_id) == "tavern":
                         if value == "exit":
-                            session["client_stages"][client_id] = "normal"
-                            refresh_client_ui(session, client_id, world)
+                            exit_client_submenu(session, client_id, world)
                         elif value == "1":
                             elena_confronted = world.state.get_flag("elena_confronted")
                             elena_recrutada = world.state.get_flag("elena_recrutada")
@@ -1477,8 +1514,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
 
                     if session["client_stages"].get(client_id) == "elder":
                         if value == "exit":
-                            session["client_stages"][client_id] = "normal"
-                            refresh_client_ui(session, client_id, world)
+                            exit_client_submenu(session, client_id, world)
                         elif value == "1":
                             player = next((p for p in world.party if getattr(p, 'client_id', None) == client_id), None)
                             if not player:
@@ -1493,8 +1529,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                             session["client_stages"][client_id] = "elder_recompensa"
                             send_elder_recompensa_menu(session, client_id, world)
                         else:
-                            session["client_stages"][client_id] = "normal"
-                            refresh_client_ui(session, client_id, world)
+                            exit_client_submenu(session, client_id, world)
                         continue
 
                     if session["client_stages"].get(client_id) == "elder_recompensa":
@@ -1519,8 +1554,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                         action = parsed.get("action", "")
                         value = parsed.get("value", "")
                         
-                        # Sub-menus por jogador (alvo, habilidade, item)
+                        # Sub-menus por jogador (alvo, habilidade, item, interrupt)
                         stage = combat.client_menu_stages.get(client_id, "main")
+                        from engine.feature_flags import FLAGS as _FF
+
+                        def _combat_main_options():
+                            opts = {"1": "Atacar", "2": "Habilidades", "4": "Defender"}
+                            if combat.can_flee:
+                                opts["5"] = "Fugir"
+                            if _FF.combat_intent:
+                                opts["6"] = "🛑 Interromper"
+                            return opts
                         
                         if stage == "main":
                             if value == "1":  # Atacar
@@ -1538,13 +1582,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                                      from engine.constants import StatusEffect
                                      if StatusEffect.AFOGAMENTO in player.status_effects:
                                          session["adapter"].emit(NarrativeText(f"⚠️ {player.name} está se afogando e não pode usar Habilidades!"))
-                                         # Resend current menu choice options (main menu)
-                                         alive = [e for e in combat.enemies if e.is_alive()]
-                                         opts = {"1": "Atacar", "2": "Habilidades", "3": "Itens", "4": "Defender"}
-                                         if combat.can_flee:
-                                             opts["5"] = "Fugir"
                                          personal_ws = session["connected_clients"][client_id][0]
-                                         payload = {"type": "WAITING_INPUT", "prompt": "O que deseja fazer? ", "options": opts,
+                                         payload = {"type": "WAITING_INPUT", "prompt": "O que deseja fazer? ", "options": _combat_main_options(),
                                                     "my_client_id": client_id, "leader_client_id": get_actual_leader_id(session, world)}
                                          send_to_ws_threadsafe(session, personal_ws, payload)
                                          continue
@@ -1564,6 +1603,24 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                                 cmd = Command(action="FLEE")
                                 combat.submit_player_action(client_id, cmd)
                                 combat.advance_state()
+                            elif value == "6" and _FF.combat_intent:  # Interromper
+                                alive = [e for e in combat.enemies if e.is_alive()]
+                                opts = {}
+                                for i, e in enumerate(alive):
+                                    intent = getattr(e, "intent_view", None)
+                                    label = intent.label if intent else "?"
+                                    lock = " ⛔" if intent and intent.uninterruptible else ""
+                                    opts[str(i)] = f"{e.name} [{label}]{lock}"
+                                combat.client_menu_stages[client_id] = "interrupt_target"
+                                personal_ws = session["connected_clients"][client_id][0]
+                                payload = {
+                                    "type": "WAITING_INPUT",
+                                    "prompt": "Interromper qual inimigo?",
+                                    "options": opts,
+                                    "my_client_id": client_id,
+                                    "leader_client_id": get_actual_leader_id(session, world),
+                                }
+                                send_to_ws_threadsafe(session, personal_ws, payload)
                                 
                         elif stage == "target":
                             # Jogador escolheu o alvo
@@ -1573,6 +1630,19 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                                 enemy = alive[target_idx]
                                 main_idx = combat.enemies.index(enemy)
                                 cmd = Command(action="ATTACK", target=main_idx)
+                                combat.client_menu_stages[client_id] = "main"
+                                combat.submit_player_action(client_id, cmd)
+                                combat.advance_state()
+                            except (ValueError, IndexError):
+                                pass
+
+                        elif stage == "interrupt_target":
+                            try:
+                                target_idx = int(value)
+                                alive = [e for e in combat.enemies if e.is_alive()]
+                                enemy = alive[target_idx]
+                                main_idx = combat.enemies.index(enemy)
+                                cmd = Command(action="INTERRUPT", target=main_idx)
                                 combat.client_menu_stages[client_id] = "main"
                                 combat.submit_player_action(client_id, cmd)
                                 combat.advance_state()
@@ -1591,6 +1661,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, name: str = 
                                     combat.advance_state()
                             except (ValueError, IndexError):
                                 pass
+
+                        elif stage == "downed":
+                            # PRD B4 — limited actions while HP <= 0
+                            action_key = value if value in ("wait", "shout", "bargain") else "wait"
+                            cmd = Command(action="DOWNED", value=action_key)
+                            combat.client_menu_stages[client_id] = "main"
+                            combat.submit_player_action(client_id, cmd)
+                            combat.advance_state()
                     else:
                         # Modo narrativa — só o líder envia input
                         actual_leader = get_actual_leader_id(session, world)

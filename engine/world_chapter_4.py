@@ -59,53 +59,70 @@ class Chapter4Mixin:
         typewriter("\n\"Vocês chegaram no pior momento possível. O que, hoje, significa a hora certa.\"", 0.03)
         typewriter("\"Três frentes sob ataque. Se uma cair, a cidade abre. Se duas caírem, Oakhaven vira cinza antes da meia-noite.\"", 0.03)
         
-        options = {
-            "1": "Liderar a defesa no Portão Sul (Ideal para Guerreiro)",
-            "2": "Restaurar a barreira na Torre do Mago (Ideal para Mago)",
-            "3": "Impedir sabotadores no Celeiro (Ideal para Ladino)"
-        }
-        
-        choice = self.get_party_vote(options, prompt="Onde o grupo liderará a defesa? ")
-        
-        if choice == "1":
+        from engine.class_gate_theater import GateApproach, run_gate_theater
+
+        def hard_siege():
+            # Resource costs are applied per-approach via assist_cost when ideal class is missing.
+            # Explicit hard-path vote only:
             clear_screen()
-            typewriter("Vocês correm em direção ao barulhento Portão Sul.", 0.03)
-            if any(p.char_class == CharacterClass.GUERREIRO for p in self.party):
-                typewriter("\n[Guerreiro] O grupo assume a linha de frente, pega o escudo de um soldado caído e firma os pés no barro.", 0.03)
-                typewriter("Os ogros de Malakar avançam com aríetes, mas sua resiliência reorganiza os defensores.", 0.03)
-                typewriter("O portão resiste com baixas mínimas. Rhea ganha tempo valioso.", 0.03)
-                self.state.set_flag("portao_sul_salvo", True)
-            else:
-                typewriter("\nOs defensores tentam segurar a linha sem um campeão para inspirá-los.", 0.03)
-                typewriter("Os ogros atingem o portão violentamente antes de recuar. Parte da muralha racha.", 0.03)
-                self.consume_resource(self.player, "hp", 20, "Destroços da muralha")
-                
-        elif choice == "2":
-            clear_screen()
-            typewriter("Vocês sobem as escadas da Torre do Mago sob uma chuva de brasas.", 0.03)
-            if any(p.char_class == CharacterClass.MAGO for p in self.party):
-                typewriter("\n[Mago] O grupo encontra o cristal da barreira pulsando fora de ritmo, com runas invertidas.", 0.03)
-                typewriter("O grupo lê o padrão, corrige a sequência de runas e usa a própria mana para canalizar o escudo rúnico.", 0.03)
-                typewriter("A barreira se reergue em placas azuladas, desviando projéteis flamejantes.", 0.03)
-                self.state.set_flag("torre_mago_salva", True)
-            else:
-                typewriter("\nSem conhecimento arcano para reconfigurar as runas, a barreira oscila e desaba.", 0.03)
-                self.consume_resource(self.player, "mp", 15, "Explosão de energia mágica")
-                
-        else:
-            clear_screen()
-            typewriter("Vocês se esgueiram silenciosamente até os celeiros de mantimentos.", 0.03)
-            if any(p.char_class == CharacterClass.LADINO for p in self.party):
-                typewriter("\n[Ladino] O grupo nota marcas de arrombamento na porta e guias de pegadas no feno.", 0.03)
-                typewriter("O grupo surpreende os sabotadores por trás antes que acendam os barris de óleo, cortando os pavios.", 0.03)
-                typewriter("Os mantimentos de Oakhaven são salvos sem chamas.", 0.03)
-                self.state.set_flag("celeiro_salvo", True)
-            else:
-                typewriter("\nVocês confrontam os sabotadores tarde demais.", 0.03)
-                typewriter("Os inimigos são derrotados, mas parte dos suprimentos queima, reduzindo os recursos de Oakhaven.", 0.03)
-                self.consume_resource(self.player, "gold", 30, "Suprimentos queimados")
-                
-        press_any_key()
+            typewriter("\nSem foco ideal, a defesa se espalha demais. As três frentes sangram.", 0.03)
+            press_any_key()
+
+        approaches = [
+            GateApproach(
+                "south_gate",
+                "Liderar a defesa no Portão Sul (Ideal para Guerreiro)",
+                CharacterClass.GUERREIRO,
+                "portao_sul_salvo",
+                (
+                    "Vocês correm ao Portão Sul.",
+                    "\n[Guerreiro] Escudos firmes no barro. Os ogros recuam. Rhea ganha tempo.",
+                ),
+                (
+                    "Sem Guerreiro, a linha segura com improvisos — a muralha racha, mas não cai.",
+                ),
+                ("hp", 20, "Destroços da muralha"),
+            ),
+            GateApproach(
+                "mage_tower",
+                "Restaurar a barreira na Torre do Mago (Ideal para Mago)",
+                CharacterClass.MAGO,
+                "torre_mago_salva",
+                (
+                    "Vocês sobem a Torre sob chuva de brasas.",
+                    "\n[Mago] Runas corrigidas. A barreira azul desvia o fogo.",
+                ),
+                (
+                    "Sem Mago, alguém força o cristal à mão — a barreira sobe fraca e drena mana.",
+                ),
+                ("mp", 15, "Explosão de energia mágica"),
+            ),
+            GateApproach(
+                "barn",
+                "Impedir sabotadores no Celeiro (Ideal para Ladino)",
+                CharacterClass.LADINO,
+                "celeiro_salvo",
+                (
+                    "Vocês se esgueiram até os celeiros.",
+                    "\n[Ladino] Pavios cortados. Mantimentos salvos sem chamas.",
+                ),
+                (
+                    "Sem Ladino, o confronto é barulhento — parte dos grãos queima.",
+                ),
+                ("gold", 30, "Suprimentos queimados"),
+            ),
+        ]
+
+        run_gate_theater(
+            self,
+            title="CERCO DE OAKHAVEN — TRÊS FRENTES",
+            intro_lines=[
+                "\"Três frentes sob ataque. Escolham onde liderar — o resto resiste como puder.\"",
+            ],
+            approaches=approaches,
+            hard_path_fn=hard_siege,
+            hard_path_label="Dividir a party sem foco (caminho difícil)",
+        )
         
         # Consequências especiais de aliados
         clear_screen()

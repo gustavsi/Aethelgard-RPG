@@ -85,9 +85,24 @@ export const GameContainer: React.FC = () => {
   React.useEffect(() => {
     if (uiContext?.type === 'GAME_OVER') {
       audioManager.stopMusic();
+      audioManager.stopWeatherAmbient();
       audioManager.playSFX('DEFEAT');
     }
   }, [uiContext?.type]);
+
+  // Update music speed and weather ambient sounds based on game state
+  React.useEffect(() => {
+    if (!gameState) return;
+    
+    const party = gameState.party || [];
+    const minHpRatio = party.length > 0 
+      ? Math.min(...party.filter((p: any) => p.hp > 0).map((p: any) => p.hp / p.max_hp)) 
+      : 1.0;
+    audioManager.updateMusicSpeed(minHpRatio);
+
+    const weather = gameState.flags?.weather || "Ensolarado";
+    audioManager.updateWeatherAmbient(weather);
+  }, [gameState]);
 
   if (error) {
     return (
@@ -140,8 +155,89 @@ export const GameContainer: React.FC = () => {
 
   console.log('in_combat:', gameState?.in_combat, 'combat_state:', gameState?.combat_state);
 
+  const weather = gameState?.flags?.weather || "Ensolarado";
+  const timeOfDay = gameState?.flags?.time_of_day || "Dia";
+
+  const weatherEmoji: Record<string, string> = {
+    "Ensolarado": "☀️",
+    "Chuvoso": "🌧️",
+    "Nevoeiro": "🌫️",
+    "Tempestade": "⛈️"
+  };
+
+  const weatherColor: Record<string, string> = {
+    "Ensolarado": "text-yellow-400",
+    "Chuvoso": "text-blue-400",
+    "Nevoeiro": "text-gray-400",
+    "Tempestade": "text-purple-400"
+  };
+
+  const timeEmoji = timeOfDay === "Dia" ? "☀️" : "🌙";
+
   return (
     <div className="w-full h-screen bg-gray-950 text-gray-100 flex flex-col font-inter selection:bg-yellow-500 selection:text-black">
+      {/* Top Status Bar */}
+      <header className="bg-black/60 border-b border-gray-900 px-6 py-3 flex items-center justify-between z-40 relative">
+        <div className="flex items-center gap-3">
+          <span className="font-cinzel text-xs font-bold tracking-[0.2em] text-yellow-600">AETHELGARD</span>
+          <span className="text-gray-800 text-xs">|</span>
+          <span className="text-gray-400 text-xs font-mono capitalize">{gameState?.current_location || "Explorando"}</span>
+        </div>
+        <div className="flex items-center gap-4 text-xs font-mono">
+          {/* Phase 2: party bonds + void corruption (from gameState.party_meta) */}
+          {(() => {
+            const meta = (gameState as any)?.party_meta;
+            if (!meta) return null;
+            const corr = meta.corruption || {};
+            const bonds = (meta.bonds || []).filter((b: any) => b.active);
+            const openDebts = (meta.debts || []).filter((d: any) => d.status === 'open').length;
+            const corrVal = corr.value ?? 0;
+            const showCorr = meta.features?.corruption !== false && corrVal > 0;
+            const showBonds = meta.features?.bonds !== false && bonds.length > 0;
+            if (!showCorr && !showBonds && openDebts === 0) return null;
+            return (
+              <>
+                {showBonds && (
+                  <div
+                    className="flex items-center gap-1.5 text-cyan-300/90"
+                    title={bonds.map((b: any) => `${b.name} Nv.${b.strength}`).join(' · ')}
+                  >
+                    <span>🔗</span>
+                    <span>{bonds.map((b: any) => `${b.name[0]}${b.strength}`).join(' ')}</span>
+                  </div>
+                )}
+                {openDebts > 0 && (
+                  <div className="flex items-center gap-1 text-amber-400/90" title="Dívidas abertas no livro">
+                    <span>📜</span>
+                    <span>{openDebts}</span>
+                  </div>
+                )}
+                {showCorr && (
+                  <div
+                    className="flex items-center gap-1.5 text-violet-300"
+                    title={`Corrupção: ${corr.tier_label || ''} (${corrVal}/${corr.max || 100})`}
+                  >
+                    <span>🌑</span>
+                    <span className="tabular-nums">{corrVal}</span>
+                    <span className="text-violet-500/80 hidden sm:inline">{corr.tier_label}</span>
+                  </div>
+                )}
+                <div className="w-px h-3 bg-gray-800" />
+              </>
+            );
+          })()}
+          <div className="flex items-center gap-1.5 text-gray-300">
+            <span>{timeEmoji}</span>
+            <span className="capitalize">{timeOfDay}</span>
+          </div>
+          <div className="w-px h-3 bg-gray-800" />
+          <div className={`flex items-center gap-1.5 ${weatherColor[weather] || 'text-gray-300'}`}>
+            <span>{weatherEmoji[weather] || "☀️"}</span>
+            <span>{weather}</span>
+          </div>
+        </div>
+      </header>
+
       {/* Main Content Area - Router based on in_combat */}
       <main className="flex-1 overflow-hidden relative flex flex-col">
         <div

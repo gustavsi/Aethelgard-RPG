@@ -60,6 +60,10 @@ class Player:
         # Quests
         self.quest_manager = QuestManager()
         
+        # Talent Tree
+        self.talent_points: int = 0
+        self.talents_unlocked: List[str] = []
+        
         # Apply starting gear
         self.equip_starting_gear()
 
@@ -93,13 +97,6 @@ class Player:
             self.inteligencia = 10
             self.agilidade = 6
             self.vitalidade = 10
-        elif self.char_class == CharacterClass.ARQUEIRO:
-            self.max_hp = 85
-            self.max_mp = 25
-            self.forca = 8
-            self.inteligencia = 5
-            self.agilidade = 12
-            self.vitalidade = 8
 
     def equip_starting_gear(self):
         """Gives starter equipment and potions."""
@@ -115,10 +112,7 @@ class Player:
         elif self.char_class == CharacterClass.CLERIGO:
             self.weapon = create_item("martelo_treino")
             self.armor = create_item("trapos_velhos")
-        elif self.char_class == CharacterClass.ARQUEIRO:
-            self.weapon = create_item("arco_simples")
-            self.armor = create_item("trapos_velhos")
-            
+
         self.inventory.append(create_item("pocao_vida_p"))
         self.inventory.append(create_item("pocao_mana_p"))
 
@@ -126,16 +120,24 @@ class Player:
         weapon_atk = self.weapon.attack_power if self.weapon else 0
         if self.char_class == CharacterClass.MAGO:
             stat_bonus = self.inteligencia
-        elif self.char_class in (CharacterClass.LADINO, CharacterClass.ARQUEIRO):
+        elif self.char_class == CharacterClass.LADINO:
             stat_bonus = self.agilidade
         else:
             stat_bonus = self.forca
-        return weapon_atk + (stat_bonus // 2)
+        atk = weapon_atk + (stat_bonus // 2)
+        # Fúria: +30% attack (mirrors enemy fury intent)
+        if StatusEffect.FURIA in self.status_effects:
+            atk = int(atk * 1.3)
+        return atk
 
     def get_defense_power(self) -> int:
         armor_def = self.armor.defense_power if self.armor else 0
         stat_bonus = self.vitalidade // 3
-        return armor_def + stat_bonus
+        defense = armor_def + stat_bonus
+        # Fúria: -30% defense
+        if StatusEffect.FURIA in self.status_effects:
+            defense = max(0, int(defense * 0.7))
+        return defense
 
     def gain_xp(self, amount: int) -> List[str]:
         """Adds XP and handles leveling up. Returns logs of changes."""
@@ -173,14 +175,12 @@ class Player:
                 self.inteligencia += 2
                 self.vitalidade += 2
                 self.forca += 1
-            elif self.char_class == CharacterClass.ARQUEIRO:
-                self.agilidade += 3
-                self.forca += 1
-                self.vitalidade += 1
-                
+
             logs.append(f"\n🎉 NÍVEL AUMENTOU! Você agora está no nível {self.level}! 🎉")
             logs.append(f"Vida Máxima aumentada para {self.max_hp}.")
             logs.append(f"Mana Máxima aumentada para {self.max_mp}.")
+            self.talent_points += 1
+            logs.append("Ganhou 1 Ponto de Talento!")
             xp_needed = self.get_xp_needed()
             
         return logs
@@ -221,6 +221,8 @@ class Player:
         
         # 1. Check Dodge (based on Agility)
         dodge_chance = min(0.40, self.agilidade * 0.02) # Max 40% dodge
+        if "ladino_trapaceiro_1" in getattr(self, "talents_unlocked", []):
+            dodge_chance += 0.10
         if StatusEffect.ESQUIVA in self.status_effects:
             dodge_chance += 0.35 # Adds 35% dodge
         if random.random() < dodge_chance:
@@ -237,6 +239,8 @@ class Player:
         defense = self.get_defense_power()
         # Ensure damage is at least 1 unless dodged
         damage_taken = max(1, int(raw_damage * (1 - block_reduction) - defense))
+        if "guerreiro_colosso_2" in getattr(self, "talents_unlocked", []):
+            damage_taken = max(1, int(damage_taken * 0.9))
         
         # Arcane Shield absorbs damage first
         if StatusEffect.ESCUDO_ARCANO in self.status_effects:

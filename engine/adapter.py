@@ -110,6 +110,11 @@ class WebUIAdapter(UIAdapter):
         elif isinstance(event, SoundEffect):
             self.ws_callback(event.to_dict())
             return None
+        else:
+            from engine.dto import VisualEffect
+            if isinstance(event, VisualEffect):
+                self.ws_callback(event.to_dict())
+                return None
         return None
 
     def get_menu_choice(self, prompt: str, options: dict) -> str:

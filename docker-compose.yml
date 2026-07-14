@@ -1,0 +1,12 @@
+services:
+  aethelgard-rpg:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./saves:/app/saves
+    environment:
+      - ENV=production
+    restart: unless-stopped

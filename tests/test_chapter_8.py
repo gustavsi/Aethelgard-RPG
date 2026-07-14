@@ -39,6 +39,7 @@ def _run_chapter_8(wm, inputs):
             
     patches.append(patch('engine.world_chapter_8.CombatSystem', _FakeCombatCapture))
     patches.append(patch('engine.world.CombatSystem', _FakeCombatCapture))
+    patches.append(patch.object(wm, 'chapter_9_start', return_value=None))
     patches.append(patch.object(wm, 'get_leader_choice', side_effect=input_queue))
     
     adapter_mock = MagicMock()

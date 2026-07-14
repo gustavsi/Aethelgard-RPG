@@ -159,18 +159,75 @@ export const NarrativeView: React.FC = () => {
                 ⏳ O líder está decidindo o próximo passo da party...
               </div>
             ) : uiContext.options ? (
-              <div className="grid grid-cols-1 gap-2.5 overflow-y-auto max-h-[45vh]">
-                {Object.entries(uiContext.options).map(([key, value]) => (
-                  <button
-                    key={key}
-                    onClick={() => handleOptionClick(key)}
-                    className="bg-gray-800 hover:bg-gray-700 text-left h-auto py-3.5 px-5 border border-gray-700 hover:border-yellow-500 rounded transition-all text-yellow-500 whitespace-normal hover:shadow-[0_0_12px_rgba(234,179,8,0.15)]"
-                  >
-                    <span className="font-bold mr-3 text-gray-500">[{key}]</span>
-                    {value}
-                  </button>
-                ))}
-              </div>
+              (() => {
+                const isDraft = uiContext.prompt?.toLowerCase().includes('bênção') ||
+                                uiContext.prompt?.toLowerCase().includes('benção') ||
+                                uiContext.prompt?.toLowerCase().includes('chefe') ||
+                                uiContext.prompt?.toLowerCase().includes('boss') ||
+                                Object.values(uiContext.options).some(v => typeof v === 'string' && (v.startsWith('🛡️') || v.startsWith('⚡') || v.startsWith('🔮') || v.startsWith('⚔️') || v.startsWith('👹')));
+
+                if (isDraft) {
+                  return (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 py-4 justify-items-center perspective-[1000px] overflow-y-auto max-h-[45vh]">
+                      {Object.entries(uiContext.options).map(([key, value], idx) => {
+                        const valStr = String(value);
+                        // Match emoji if any
+                        const emojiMatch = valStr.match(/^([\uD800-\uDBFF][\uDC00-\uDFFF]|\u00ae|\u00a9|[\u2000-\u3300]|[\u2700-\u27bf])/);
+                        const emoji = emojiMatch ? emojiMatch[0] : "✨";
+                        const remainingText = emojiMatch ? valStr.substring(emoji.length).trim() : valStr;
+                        
+                        // Extract title and description e.g. "Escudo Ancestral (Vitalidade +8)"
+                        const descMatch = remainingText.match(/\(([^)]+)\)/);
+                        const description = descMatch ? `(${descMatch[1]})` : "";
+                        const title = descMatch ? remainingText.replace(/\([^)]+\)/, "").trim() : remainingText;
+
+                        return (
+                          <div
+                            key={key}
+                            onClick={() => handleOptionClick(key)}
+                            className="group relative cursor-pointer w-full max-w-[220px] h-[280px] rounded-2xl bg-gradient-to-b from-[#1c1829] to-[#0c0914] border border-gray-800 hover:border-yellow-500/50 shadow-2xl transition-all duration-500 transform-gpu hover:-translate-y-3 hover:scale-105 hover:shadow-[0_15px_30px_rgba(234,179,8,0.25)] flex flex-col items-center justify-between p-5 overflow-hidden animate-[fadeIn_0.5s_ease-out_both]"
+                            style={{ transformStyle: 'preserve-3d', animationDelay: `${idx * 150}ms` }}
+                          >
+                            <div className="absolute inset-0 bg-gradient-to-tr from-yellow-500/0 via-yellow-500/0 to-yellow-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none" />
+                            
+                            <div className="text-gray-500 font-cinzel font-bold text-xs tracking-wider self-start">
+                              [{key}]
+                            </div>
+
+                            <div className="flex flex-col items-center justify-center gap-3 py-1 transform transition-transform duration-500 group-hover:translate-z-[40px]">
+                              <div className="text-4xl drop-shadow-[0_0_15px_rgba(255,255,255,0.15)] group-hover:scale-110 transition-transform duration-500">
+                                {emoji}
+                              </div>
+                              <div className="text-center font-cinzel text-base font-bold text-yellow-500 tracking-wide mt-1">
+                                {title}
+                              </div>
+                            </div>
+
+                            <div className="text-center text-[11px] text-gray-400 font-medium tracking-wide bg-black/40 border border-gray-900/60 rounded-lg px-2.5 py-1 w-full mt-1 min-h-[32px] flex items-center justify-center">
+                              {description || "Efeito na Arena"}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="grid grid-cols-1 gap-2.5 overflow-y-auto max-h-[45vh]">
+                    {Object.entries(uiContext.options).map(([key, value]) => (
+                      <button
+                        key={key}
+                        onClick={() => handleOptionClick(key)}
+                        className="bg-gray-800 hover:bg-gray-700 text-left h-auto py-3.5 px-5 border border-gray-700 hover:border-yellow-500 rounded transition-all text-yellow-500 whitespace-normal hover:shadow-[0_0_12px_rgba(234,179,8,0.15)]"
+                      >
+                        <span className="font-bold mr-3 text-gray-500">[{key}]</span>
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()
             ) : uiContext?.subtype === 'PRESS_ANY_KEY' ? (
               <button
                 onClick={() => sendAction({ action: "INPUT", value: " " })}
@@ -348,6 +405,14 @@ export const NarrativeView: React.FC = () => {
                      text-yellow-400 px-4 py-2 rounded font-cinzel text-sm
                      hover:border-yellow-400 transition-all shadow-lg hover:shadow-[0_0_15px_rgba(234,179,8,0.2)]">
           🎒 Inventário
+      </button>
+
+      {/* Botão de Talentos */}
+      <button onClick={() => sendAction({action: "OPEN_TALENTS"})}
+          className="fixed bottom-4 right-96 z-50 bg-gray-800 border border-green-700 
+                     text-green-400 px-4 py-2 rounded font-cinzel text-sm
+                     hover:border-green-400 transition-all shadow-lg hover:shadow-[0_0_15px_rgba(34,197,94,0.2)]">
+          🌳 Talentos
       </button>
 
       {/* Botão de Limpar Log Local */}

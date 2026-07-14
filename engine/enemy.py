@@ -75,6 +75,8 @@ class Enemy:
             return self._ai_boss_grum(player, combat_state)
         elif self.ai_type == AIType.BOSS_GOLEM:
             return self._ai_boss_golem(player, combat_state)
+        elif self.ai_type == AIType.BOSS_UIVADOR:
+            return self._ai_boss_uivador(player, combat_state)
         elif self.ai_type == AIType.DEFENSIVE:
             return self._ai_defensive(player, combat_state)
         elif self.ai_type == AIType.CASTER:
@@ -334,6 +336,25 @@ class Enemy:
             logs.append(f"⚔️ {self.name} avança esmagando o chão de Kragmoor!")
             return "ATTACK", self.attack, logs
 
+    def _ai_boss_uivador(self, player, combat_state) -> Tuple[str, int, List[str]]:
+        logs = []
+        roll = random.random()
+        if roll < 0.35:
+            from engine.constants import StatusEffect
+            logs.append(f"🔊 {self.name} solta um Uivo do Silêncio ensurdecedor!")
+            player.status_effects[StatusEffect.ATORDOADO] = 1
+            return "ATTACK", int(self.attack * 1.1), logs
+        elif roll < 0.65:
+            logs.append(f"❄️ {self.name} expele um Sopro Gélido do Vazio!")
+            return "ATTACK", int(self.attack * 1.5), logs
+        elif roll < 0.85:
+            logs.append(f"💨 {self.name} se camufla sob a névoa fria da montanha.")
+            self.defending = True
+            return "DEFEND", 0, logs
+        else:
+            logs.append(f"⚔️ {self.name} avança com garras congeladas!")
+            return "ATTACK", self.attack, logs
+
 # Library of enemies
 ENEMIES_LIBRARY = {
     # Chapter 1 standard
@@ -370,8 +391,12 @@ ENEMIES_LIBRARY = {
     "grum_afogado": lambda: Enemy("Contramestre Grum, o Afogado", 200, 26, 6, 400, 200, AIType.BOSS_GRUM),
     
     # Chapter 8
-    "uivador_vazio": lambda: Enemy("Uivador do Vazio", 110, 20, 3, 80, 35, AIType.AGGRESSIVE),
-    "golem_kragmoor": lambda: Enemy("Golem de Kragmoor, o Corrompido", 240, 28, 8, 500, 250, AIType.BOSS_GOLEM)
+    "golem_kragmoor": lambda: Enemy("Golem de Kragmoor, o Corrompido", 240, 28, 8, 500, 250, AIType.BOSS_GOLEM),
+    
+    # Chapter 9
+    "espectro_gelo": lambda: Enemy("Espectro do Gelo", 90, 15, 3, 70, 30, AIType.AGGRESSIVE),
+    "lobo_gelo_quest": lambda: Enemy("Lobo do Gelo Ancestral", 70, 12, 2, 45, 15, AIType.AGGRESSIVE),
+    "uivador_vazio": lambda: Enemy("Uivador do Vazio, Fera do Norte", 250, 24, 6, 500, 250, AIType.BOSS_UIVADOR)
 }
 
 def spawn_enemy(enemy_id: str) -> Optional[Enemy]:

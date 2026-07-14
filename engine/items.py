@@ -136,6 +136,9 @@ ITEMS_LIBRARY = {
     
     "erva_cura": lambda: Consumable("Erva de Cura", ItemType.CONSUMIVEL, Rarity.COMUM, "Cura 10 HP e remove efeitos de status negativos.", 8, heal_hp=10, purge_status=True),
     "antidoto": lambda: Consumable("Antídoto", ItemType.CONSUMIVEL, Rarity.RARO, "Remove todos os efeitos de status negativos e cura 20 HP.", 40, heal_hp=20, purge_status=True),
+    "lampeao_eter": lambda: Item("Lampião de Éter", ItemType.QUEST, Rarity.RARO, "Anula a penalidade de precisão sob Nevoeiro.", 50),
+    "capa_impermeavel": lambda: Item("Capa Impermeável", ItemType.QUEST, Rarity.RARO, "Anula a penalidade de dano de fogo sob Chuva.", 50),
+    "minerio_gelo_eterno": lambda: Item("Minério de Gelo Eterno", ItemType.QUEST, Rarity.EPICO, "Minério rústico que pulsa com o frio do norte.", 200),
 }
 
 def create_item(item_id: str) -> Optional[Item]:

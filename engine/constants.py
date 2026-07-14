@@ -39,7 +39,6 @@ class CharacterClass(enum.Enum):
     MAGO = "Mago"
     LADINO = "Ladino"
     CLERIGO = "Clérigo"
-    ARQUEIRO = "Arqueiro"
 
 class Rarity(enum.Enum):
     COMUM = ("Comum", Colors.WHITE)
@@ -71,6 +70,7 @@ class AIType(enum.Enum):
     BOSS_MALAKAR = "Boss: Malakar"
     BOSS_GRUM = "Boss: Grum"
     BOSS_GOLEM = "Boss: Golem"
+    BOSS_UIVADOR = "Boss: Uivador"
 
 class StatusEffect(enum.Enum):
     ENVENENADO = ("Envenenado", Colors.GREEN, "Causa dano a cada turno.")
@@ -103,3 +103,14 @@ GAME_CONFIG = {
     "DEFAULT_MAX_HP": 100,
     "DEFAULT_MAX_MP": 50,
 }
+
+class TimeOfDay(enum.Enum):
+    DIA = "Dia"
+    NOITE = "Noite"
+
+class Weather(enum.Enum):
+    SOL = "Ensolarado"
+    CHUVA = "Chuvoso"
+    NEVOEIRO = "Nevoeiro"
+    TEMPESTADE = "Tempestade"
+

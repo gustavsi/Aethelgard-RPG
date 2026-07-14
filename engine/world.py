@@ -1,6 +1,6 @@
 import time
 import random
-from engine.constants import CharacterClass, AIType
+from engine.constants import CharacterClass, AIType, Colors
 from engine.dto import NarrativeText, ChoiceRequested, ClearScreen, PressAnyKey, SoundEffect
 
 def clear_screen():
@@ -42,8 +42,9 @@ from engine.world_chapter_4 import Chapter4Mixin
 from engine.world_chapter_5 import Chapter5Mixin
 from engine.world_chapter_7 import Chapter7Mixin
 from engine.world_chapter_8 import Chapter8Mixin
+from engine.world_chapter_9 import Chapter9Mixin
 
-class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, Chapter8Mixin):
+class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, Chapter8Mixin, Chapter9Mixin):
     def __init__(self, player, adapter=None, party=None):
         from engine.state import GameState
         from engine.adapter import UIAdapter
@@ -75,6 +76,42 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
     @party.setter
     def party(self, value):
         self.state.party = value
+
+    def recruit_companion(self, companion_id: str):
+        from engine.companion import get_companion
+        new_companion = get_companion(companion_id)
+        if not new_companion:
+            return
+        if self.player.companion:
+            old_name = self.player.companion.name
+            typewriter(f"\n⚠️ {old_name} deixa o grupo para abrir espaço para {new_companion.name}.", 0.03)
+        self.player.companion = new_companion
+        typewriter(f"\n✨ {new_companion.name} juntou-se ao grupo!", 0.03)
+
+    def update_environment(self):
+        """Atualiza dinamicamente o clima e o ciclo dia/noite."""
+        # 1. Ciclo Dia/Noite
+        current_time = self.state.get_flag("time_of_day", "Dia")
+        new_time = "Noite" if current_time == "Dia" else "Dia"
+        
+        # 2. Clima Dinâmico
+        weathers = ["Ensolarado", "Chuvoso", "Nevoeiro", "Tempestade"]
+        weights = [0.5, 0.25, 0.15, 0.10]
+        new_weather = random.choices(weathers, weights=weights)[0]
+        
+        self.state.set_flag("time_of_day", new_time)
+        self.state.set_flag("weather", new_weather)
+        
+        # Emitir log informando a mudança de clima
+        emoji_time = "☀️" if new_time == "Dia" else "🌙"
+        emoji_weather = {
+            "Ensolarado": "☀️",
+            "Chuvoso": "🌧️",
+            "Nevoeiro": "🌫️",
+            "Tempestade": "⛈️"
+        }.get(new_weather, "☀️")
+        
+        typewriter(f"\n🌍 {Colors.BOLD}O clima mudou!{Colors.RESET} Agora é {new_time} {emoji_time} e o tempo está {new_weather} {emoji_weather}.", 0.02)
 
     def get_leader_choice(self, options, prompt="Escolha uma opção: "):
         # Future multiplayer routing will check self.state.get_flag("party_lider")
@@ -115,6 +152,13 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
             winning_choice = random.choice(winners)
             d20 = random.randint(1, 20)
             self.adapter.emit(NarrativeText(f"🎲 Empate! Rolando um d20... ({d20}) — decisão: {options[winning_choice]}"))
+
+        # Phase 2: Unison / Fracture bonds from multiplayer votes
+        try:
+            from engine.party_meta import observe_vote
+            observe_vote(self.state, votes, winning_choice)
+        except Exception:
+            pass
 
         return winning_choice
 
@@ -380,7 +424,7 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
         for log in xp_logs:
             self.adapter.emit(NarrativeText(log))
         
-        loot = create_item("arco_elfico") if any(p.char_class.name == "ARQUEIRO" for p in self.party) else create_item("elixir_forca")
+        loot = create_item("elixir_forca")
         self.player.inventory.append(loot)
         self.adapter.emit(NarrativeText(f"\nO grupo encontrou: {loot.get_colored_name()}!"))
         
@@ -461,6 +505,13 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
                     return "END_COMBAT"
                 else:
                     self.state.set_flag("poupou_ogro", False)
+                    # P2-001: kill corruption must NOT come from set_flag(False) init —
+                    # only from this explicit kill branch.
+                    try:
+                        from engine.party_meta import record_ogre_killed
+                        record_ogre_killed(self.state)
+                    except Exception:
+                        pass
                     combat_sys.adapter.emit(NarrativeText("Vocês ignoram as súplicas da criatura e desferem o golpe final!"))
                     ogre.hp = 0
                     return "END_COMBAT"
@@ -558,22 +609,32 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
             clear_screen()
             print_centered("=== VILA DE OAKHAVEN ===", None)
             self.adapter.emit(AsciiArt(TOWN_ART))
-            
-            options = {
-                "1": "Visitar a Taverna do Javali Saltitante",
-                "2": "Visitar a Forja de Garrett",
-                "3": "Falar com o Ancião Alistair",
-                "4": "Salvar Jogo",
-                "5": "Gerenciar Equipamentos e Status",
-                "6": "Viajar para as Cavernas Sussurrantes (Seguir a Missão)"
-            }
+            try:
+                from engine.hub_schedule import oakhaven_menu_options, schedule_blurb, is_forge_open
+                typewriter(schedule_blurb(self.state), 0.02)
+                options = oakhaven_menu_options(self.state)
+            except Exception:
+                options = {
+                    "1": "Visitar a Taverna do Javali Saltitante",
+                    "2": "Visitar a Forja de Garrett",
+                    "3": "Falar com o Ancião Alistair",
+                    "4": "Salvar Jogo",
+                    "5": "Gerenciar Equipamentos e Status",
+                    "6": "Viajar para as Cavernas Sussurrantes (Seguir a Missão)",
+                }
+                def is_forge_open(_s):
+                    return True
             
             choice = self.get_leader_choice(options, prompt="Para onde o grupo deseja ir? ")
             if choice == "1":
                 self.tavern_interaction()
             elif choice == "2":
-                forge = Blacksmith()
-                forge.interact(self.player)
+                if not is_forge_open(self.state):
+                    typewriter("\nA forja está fechada à noite. Garrett deixou um bilhete: \"Voltem ao amanhecer.\"", 0.03)
+                    press_any_key()
+                else:
+                    forge = Blacksmith()
+                    forge.interact(self.player)
             elif choice == "3":
                 elder = ElderAlistair()
                 elder.interact(self.player)
@@ -583,6 +644,19 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
                 press_any_key()
             elif choice == "5":
                 manage_inventory(self.player)
+            elif choice == "7":
+                try:
+                    from engine.rumor_board import present_rumor_board
+                    present_rumor_board(self)
+                except Exception:
+                    typewriter("O quadro de rumores está ilegível sob a chuva.", 0.03)
+                    press_any_key()
+            elif choice == "8":
+                try:
+                    from engine.codex import show_codex
+                    show_codex(self)
+                except Exception:
+                    pass
             else:
                 # Check if player accepted the quest
                 if not self.player.quest_manager.has_active("cavernas"):
@@ -644,8 +718,7 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
                 if ans == "1":
                     typewriter("\nElena suspira, com raiva, mas impressionada com a honestidade.", 0.03)
                     typewriter("\"Pelo menos é sincero. Mas você devolverá isso à vila depois. Vou com você para garantir que faça a coisa certa.\"", 0.03, None)
-                    self.player.companion = get_companion("elena")
-                    self.adapter.emit(NarrativeText(f"\nElena juntou-se ao seu grupo como companheira!"))
+                    self.recruit_companion("elena")
                 else:
                     typewriter("\nElena se levanta e coloca a mão na adaga.", 0.03)
                     typewriter("\"Miro em mentirosos de longe. Saiam da minha frente antes que eu teste minha flecha em seus pescoços!\"", 0.03, None)
@@ -654,8 +727,7 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
             else:
                 typewriter("\nElena sorri levemente e guarda o arco.", 0.03)
                 typewriter("\"Ajudar Oakhaven? Raro ver alguém com espírito de herói hoje em dia. Muito bem, meu arco está a serviço de vocês. Vamos caçar essas sombras nas cavernas.\"", 0.03, None)
-                self.player.companion = get_companion("elena")
-                self.adapter.emit(NarrativeText(f"\nElena juntou-se ao grupo de vocês como companheira!"))
+                self.recruit_companion("elena")
                 
         elif choice == "2":
             typewriter("\n\"Glória só traz túmulos vazios. Prefiro trabalhar sozinha.\" - diz ela friamente.", 0.03, None)
@@ -670,6 +742,11 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
 
     # ================= CHAPTER 2 =================
     def chapter_2_start(self):
+        try:
+            from engine.campfire import run_campfire
+            run_campfire(self, chapter_label="pre_ch2")
+        except Exception:
+            pass
         save_game(self.state, lambda msg: self.adapter.emit(NarrativeText("💾 [Auto-Salvar] Jogo salvo com sucesso.")))
         self.state.current_location = "caverna"
         self.state.current_chapter = 2
@@ -873,7 +950,14 @@ class WorldManager(Chapter3Mixin, Chapter4Mixin, Chapter5Mixin, Chapter7Mixin, C
             self.state.set_flag("guardou_pergaminho", True)
             typewriter(f"\nVocês guardam o Pergaminho de Sangue. Sentem as sombras sussurrarem em suas mentes...", 0.03)
             
-        self.player.quest_manager.complete_quest("cavernas", self.player, lambda msg: self.adapter.emit(NarrativeText(msg)))
+        # Complete quest rewards for every party member (not only the leader)
+        log_fn = lambda msg: self.adapter.emit(NarrativeText(msg))
+        for p in self.party:
+            q = p.quest_manager.quests.get("cavernas")
+            if q and not q.is_completed:
+                if not q.is_active:
+                    q.is_active = True
+                p.quest_manager.complete_quest("cavernas", p, log_fn)
         press_any_key()
             
         typewriter("\nCom as cavernas pacificadas, vocês decidem seguir viagem em direção à Vila de Millhaven.", 0.03)

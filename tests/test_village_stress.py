@@ -82,7 +82,7 @@ class TestVillageStress:
                 session["waiting_for_ready"] = True
                 
                 # A opens forge
-                ws_a.send_json({"action": "MENU_CHOICE", "value": "4"})
+                ws_a.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 receive_until_type(ws_a, "WAITING_INPUT", "Forja")
 
                 cids = list(session["connected_clients"].keys())
@@ -116,9 +116,9 @@ class TestVillageStress:
                 player_b.gold = 100
 
                 # Both open forge
-                ws_a.send_json({"action": "MENU_CHOICE", "value": "4"})
+                ws_a.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 receive_until_type(ws_a, "WAITING_INPUT", "Forja")
-                ws_b.send_json({"action": "MENU_CHOICE", "value": "4"})
+                ws_b.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 receive_until_type(ws_b, "WAITING_INPUT", "Forja")
 
                 # Both buy different items simultaneously
@@ -189,11 +189,11 @@ class TestVillageStress:
                 session["waiting_for_ready"] = True
 
                 # A opens forge
-                ws_a.send_json({"action": "MENU_CHOICE", "value": "4"})
+                ws_a.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 receive_until_type(ws_a, "WAITING_INPUT", "Forja")
 
-                # A sends a choice "5" (not valid in forge, would open tavern in town)
-                ws_a.send_json({"action": "MENU_CHOICE", "value": "5"})
+                # A sends a choice "tavern" (not valid in forge; must not switch stage)
+                ws_a.send_json({"action": "MENU_CHOICE", "value": "tavern"})
                 time.sleep(0.1)
 
                 # Forge stage should remain unchanged, no tavern should be opened
@@ -221,7 +221,7 @@ class TestVillageStress:
                 cids = list(session["connected_clients"].keys())
 
                 # A opens forge
-                ws_a.send_json({"action": "MENU_CHOICE", "value": "4"})
+                ws_a.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 receive_until_type(ws_a, "WAITING_INPUT", "Forja")
 
                 # Sends exit twice in rapid succession
@@ -402,7 +402,7 @@ class TestVillageStress:
                 player_a.gold = 100
 
                 # A opens forge
-                ws_a.send_json({"action": "MENU_CHOICE", "value": "4"})
+                ws_a.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 receive_until_type(ws_a, "WAITING_INPUT", "Forja")
 
                 # A buys Soldier Sword
@@ -445,7 +445,7 @@ class TestVillageStress:
                 cids = list(session["connected_clients"].keys())
 
                 # B opens forge
-                ws_b.send_json({"action": "MENU_CHOICE", "value": "4"})
+                ws_b.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 receive_until_type(ws_b, "WAITING_INPUT", "Forja")
                 assert session["client_stages"].get(cids[1]) == "forge"
 

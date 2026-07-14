@@ -31,6 +31,11 @@ def play_sound_effect(effect_text, color=None):
 
 class Chapter7Mixin:
     def chapter_7_start(self):
+        try:
+            from engine.campfire import run_campfire
+            run_campfire(self, chapter_label="pre_ch7")
+        except Exception:
+            pass
         from engine.save_system import save_game
         save_game(self.state, lambda msg: self.adapter.emit(NarrativeText("💾 [Auto-Salvar] Jogo salvo com sucesso.")))
         self.state.current_location = "vaelmoor"
@@ -216,8 +221,7 @@ class Chapter7Mixin:
                 rec_choice = self.get_party_vote(recruit_opt, prompt="Recrutar Ysolde? ")
                 if rec_choice == "1":
                     typewriter("\nYsolde sorri e limpa o casaco: \"Uma boa tripulação é difícil de achar. Vamos ver do que vocês são capazes na estrada.\"", 0.03)
-                    from engine.companion import get_companion
-                    self.player.companion = get_companion("ysolde")
+                    self.recruit_companion("ysolde")
                     press_any_key()
             return
 

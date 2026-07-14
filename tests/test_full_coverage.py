@@ -79,7 +79,7 @@ def run_chapter_flow(wm, chapter_fn_name, inputs, next_chapter_fn_name=None):
     mock_typewriter = MagicMock()
     _UI_FNS = ('clear_screen', 'press_any_key', 'print_centered', 'play_sound_effect')
     _MODULES = ('engine.world', 'engine.world_chapter_3', 'engine.world_chapter_4', 
-                'engine.world_chapter_5', 'engine.world_chapter_7', 'engine.world_chapter_8')
+                'engine.world_chapter_5', 'engine.world_chapter_7', 'engine.world_chapter_8', 'engine.world_chapter_9')
     
     for mod in _MODULES:
         for fn in _UI_FNS:
@@ -92,6 +92,7 @@ def run_chapter_flow(wm, chapter_fn_name, inputs, next_chapter_fn_name=None):
     patches.append(patch('engine.world_chapter_5.CombatSystem', _FakeCombat))
     patches.append(patch('engine.world_chapter_7.CombatSystem', _FakeCombat))
     patches.append(patch('engine.world_chapter_8.CombatSystem', _FakeCombat))
+    patches.append(patch('engine.world_chapter_9.CombatSystem', _FakeCombat))
     
     if next_chapter_fn_name:
         patches.append(patch.object(wm, next_chapter_fn_name, return_value=None))
@@ -245,16 +246,28 @@ class TestTodasAsClasses:
         (CharacterClass.MAGO, "chapter_8_start", ["3", "1", "1"], "kragmoor_selo_realinhado"),
         (CharacterClass.CLERIGO, "chapter_8_start", ["4", "1", "1"], "kragmoor_purificado"),
         (CharacterClass.GUERREIRO, "chapter_8_start", ["5", "1", "1"], None),
+        # Chapter 9
+        (CharacterClass.GUERREIRO, "chapter_9_start", ["1", "2"], "gelido_totem_erguido"),
+        (CharacterClass.MAGO, "chapter_9_start", ["2", "2"], "gelido_gelo_derretido"),
+        (CharacterClass.LADINO, "chapter_9_start", ["3", "2"], "gelido_trilha_furtiva"),
+        (CharacterClass.CLERIGO, "chapter_9_start", ["4", "2"], "gelido_totem_purificado"),
+        (CharacterClass.GUERREIRO, "chapter_9_start", ["5", "2"], None),
     ])
     def test_class_gates(self, char_class, chapter_fn, inputs, expected_flag):
         wm = _make_world(char_class)
-        next_fn = "chapter_8_start" if chapter_fn == "chapter_7_start" else "credits"
+        if chapter_fn == "chapter_7_start":
+            next_fn = "chapter_8_start"
+        elif chapter_fn == "chapter_8_start":
+            next_fn = "chapter_9_start"
+        else:
+            next_fn = "credits"
         run_chapter_flow(wm, chapter_fn, inputs, next_chapter_fn_name=next_fn)
         if expected_flag:
             assert wm.state.get_flag(expected_flag) is True
         else:
             for flag in ["vaelmoor_infiltrado", "vaelmoor_duelo_vencido", "vaelmoor_selo_identificado", "vaelmoor_corrupcao_sentida",
-                         "kragmoor_infiltrado", "kragmoor_portão_erguido", "kragmoor_selo_realinhado", "kragmoor_purificado"]:
+                         "kragmoor_infiltrado", "kragmoor_portão_erguido", "kragmoor_selo_realinhado", "kragmoor_purificado",
+                         "gelido_totem_erguido", "gelido_gelo_derretido", "gelido_trilha_furtiva", "gelido_totem_purificado"]:
                 assert wm.state.get_flag(flag) is not True
 
     @pytest.mark.parametrize("leader_class", [
@@ -520,25 +533,25 @@ class TestNavegacaoDeVilaIndependente:
                 send_to_ws_threadsafe(session, ws_a_server, {
                     "type": "WAITING_INPUT",
                     "prompt": "Aguardando",
-                    "options": {"1": "Pronto", "4": "Forja", "5": "Taverna", "6": "Alistair"}
+                    "options": {"1": "Pronto", "forge": "Forja", "tavern": "Taverna", "elder": "Alistair"}
                 })
                 send_to_ws_threadsafe(session, ws_b_server, {
                     "type": "WAITING_INPUT",
                     "prompt": "Aguardando",
-                    "options": {"1": "Pronto", "4": "Forja", "5": "Taverna", "6": "Alistair"}
+                    "options": {"1": "Pronto", "forge": "Forja", "tavern": "Taverna", "elder": "Alistair"}
                 })
                 
                 # A visits the forge
-                print("[TRACE] A choosing 4")
-                ws_a.send_json({"action": "MENU_CHOICE", "value": "4"})
+                print("[TRACE] A choosing forge")
+                ws_a.send_json({"action": "MENU_CHOICE", "value": "forge"})
                 print("[TRACE] A waiting for WAITING_INPUT Forja")
                 wi_forge = receive_until_type(ws_a, "WAITING_INPUT", "Forja")
                 assert "Forja" in wi_forge["prompt"]
                 assert session["client_stages"][player_a.client_id] == "forge"
                 
                 # B visits the tavern
-                print("[TRACE] B choosing 5")
-                ws_b.send_json({"action": "MENU_CHOICE", "value": "5"})
+                print("[TRACE] B choosing tavern")
+                ws_b.send_json({"action": "MENU_CHOICE", "value": "tavern"})
                 print("[TRACE] B waiting for WAITING_INPUT Taverna")
                 wi_tavern = receive_until_type(ws_b, "WAITING_INPUT", "Taverna")
                 assert "Taverna" in wi_tavern["prompt"]

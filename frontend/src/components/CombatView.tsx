@@ -2,6 +2,14 @@ import React, { useRef, useEffect } from 'react';
 import { useGame } from '../contexts/WebSocketProvider';
 import { useVisualEffects } from '../contexts/VisualEffectProvider';
 import { ProjectileLayer } from './ProjectileLayer';
+import audioManager from '../audio/AudioManager';
+
+interface EnemyIntent {
+  category: string;
+  label: string;
+  uninterruptible: boolean;
+  interrupted: boolean;
+}
 
 interface Enemy {
   idx: number;
@@ -13,7 +21,24 @@ interface Enemy {
   alive: boolean;
   defending: boolean;
   status: string[];
+  intent?: EnemyIntent | null;
 }
+
+const INTENT_STYLE: Record<string, string> = {
+  attack: 'bg-red-900/70 text-red-200 border-red-600/60',
+  cast: 'bg-violet-900/70 text-violet-200 border-violet-500/60',
+  guard: 'bg-sky-900/70 text-sky-200 border-sky-500/60',
+  special: 'bg-amber-900/70 text-amber-200 border-amber-500/60',
+  none: 'bg-gray-800/70 text-gray-400 border-gray-600/50',
+};
+
+const INTENT_ICON: Record<string, string> = {
+  attack: '⚔️',
+  cast: '✨',
+  guard: '🛡️',
+  special: '☠️',
+  none: '·',
+};
 
 const getHeroSprite = (playerClass: any) => {
   const c = String(playerClass || "").toLowerCase();
@@ -24,6 +49,32 @@ const getHeroSprite = (playerClass: any) => {
   return '/hero.jpg';
 };
 
+const getSubclassAuraClass = (talents: string[] | undefined): string => {
+  if (!talents) return "";
+  const t = talents;
+  // Warrior: Colosso 2 + Berserker 2 -> Juggernaut Calejado
+  if (t.includes("guerreiro_colosso_2") && t.includes("guerreiro_berserker_2")) {
+    return "ring-4 ring-red-600 shadow-[0_0_20px_#ef4444] animate-pulse";
+  }
+  // Mage: Piromante 2 + Criomante 2 -> Tempestade de Gelo
+  if (t.includes("mago_piromante_2") && t.includes("mago_criomante_2")) {
+    return "ring-4 ring-cyan-400 shadow-[0_0_20px_#06b6d4] animate-pulse";
+  }
+  // Cleric: Santo 2 + Inquisidor 2 -> Cruzado
+  if (t.includes("clerigo_santo_2") && t.includes("clerigo_inquisidor_2")) {
+    return "ring-4 ring-yellow-400 shadow-[0_0_20px_#fbbf24] animate-pulse";
+  }
+  // Ranger: Caçador 2 + Sentinela 2 -> Sentinela Oportunista
+  if (t.includes("arqueiro_cacador_2") && t.includes("arqueiro_sentinela_2")) {
+    return "ring-4 ring-emerald-500 shadow-[0_0_20px_#10b981] animate-pulse";
+  }
+  // Rogue: Assassino 2 + Trapaceiro 2 -> Dança das Sombras
+  if (t.includes("ladino_assassino_2") && t.includes("ladino_trapaceiro_2")) {
+    return "ring-4 ring-purple-600 shadow-[0_0_20px_#8b5cf6] animate-pulse";
+  }
+  return "";
+};
+
 export const CombatView: React.FC = () => {
   const { gameState, uiContext, sendAction, isLeader, myClientId } = useGame();
   const combatState = gameState?.combat_state;
@@ -31,6 +82,8 @@ export const CombatView: React.FC = () => {
   console.log('PARTY DATA:', gameState?.party, 'MY_CLIENT_ID:', myClientId);
 
   const { effects, triggerEffect } = useVisualEffects();
+  const weather = gameState?.flags?.weather || "Ensolarado";
+  const timeOfDay = gameState?.flags?.time_of_day || "Dia";
 
   const prevEnemyHpsRef = useRef<Record<number, number>>({});
   const prevPlayerHpRef = useRef<number>(gameState?.player?.hp || 0);
@@ -52,50 +105,133 @@ export const CombatView: React.FC = () => {
           color: 'gold',
           duration: 2000
         });
+        triggerEffect({
+          type: 'screen_flash',
+          targetId: 'global',
+          duration: 500,
+          color: 'heal',
+        });
+        audioManager.playSFX('LEVEL_UP');
       }
       prevLevelRef.current = gameState.player.level;
     }
   }, [gameState?.player?.level, triggerEffect]);
 
-  // Monitor party HP
+  // Monitor party HP → local VFX + hit SFX (backend VFX may lag / miss multiplayer)
   useEffect(() => {
     if (gameState?.party) {
       gameState.party.forEach((member: any) => {
         const id = member.client_id || 'leader';
         const prevHp = prevPartyHpsRef.current[id];
-        if (prevHp !== undefined && member.hp < prevHp) {
-          triggerEffect({
-            type: 'shake',
-            targetId: `party_${id}`,
-            duration: 400
-          });
+        if (prevHp !== undefined && member.hp !== prevHp) {
+          const delta = member.hp - prevHp;
+          if (delta < 0) {
+            const dmg = Math.abs(delta);
+            const isCrit = dmg >= Math.max(12, (member.max_hp || 50) * 0.18);
+            triggerEffect({ type: 'shake', targetId: `party_${id}`, duration: 420 });
+            triggerEffect({ type: 'impact', targetId: `party_${id}`, duration: 420, isCrit });
+            triggerEffect({
+              type: 'damage_number',
+              targetId: `party_${id}`,
+              amount: dmg,
+              isCrit,
+              duration: 1000,
+              text: `-${dmg}`,
+            });
+            triggerEffect({
+              type: 'screen_flash',
+              targetId: 'global',
+              duration: isCrit ? 380 : 280,
+              color: isCrit ? 'crit' : 'damage',
+            });
+            audioManager.playHit(isCrit, Math.min(1.4, 0.7 + dmg / 40));
+          } else if (delta > 0) {
+            triggerEffect({ type: 'heal_glow', targetId: id, duration: 1100 });
+            triggerEffect({
+              type: 'heal_number',
+              targetId: `party_${id}`,
+              amount: delta,
+              duration: 1000,
+              text: `+${delta}`,
+            });
+            triggerEffect({
+              type: 'screen_flash',
+              targetId: 'global',
+              duration: 300,
+              color: 'heal',
+            });
+            audioManager.playSFX('heal_chime', { intensity: 0.85 });
+          }
         }
         prevPartyHpsRef.current[id] = member.hp;
       });
     } else if (gameState?.player) {
       const prevHp = prevPlayerHpRef.current;
-      if (prevHp !== undefined && gameState.player.hp < prevHp) {
-        triggerEffect({
-          type: 'shake',
-          targetId: 'party_leader',
-          duration: 400
-        });
+      if (prevHp !== undefined && gameState.player.hp !== prevHp) {
+        const delta = gameState.player.hp - prevHp;
+        if (delta < 0) {
+          const dmg = Math.abs(delta);
+          const isCrit = dmg >= 12;
+          triggerEffect({ type: 'shake', targetId: 'party_leader', duration: 420 });
+          triggerEffect({ type: 'impact', targetId: 'party_leader', duration: 420, isCrit });
+          triggerEffect({
+            type: 'damage_number',
+            targetId: 'party_leader',
+            amount: dmg,
+            isCrit,
+            duration: 1000,
+            text: `-${dmg}`,
+          });
+          audioManager.playHit(isCrit);
+        } else if (delta > 0) {
+          triggerEffect({ type: 'heal_glow', targetId: 'leader', duration: 1100 });
+          triggerEffect({
+            type: 'heal_number',
+            targetId: 'party_leader',
+            amount: delta,
+            duration: 1000,
+            text: `+${delta}`,
+          });
+        }
       }
       prevPlayerHpRef.current = gameState.player.hp;
     }
   }, [gameState?.party, gameState?.player?.hp, triggerEffect]);
 
-  // Monitor enemy HP
+  // Monitor enemy HP → impact + floating numbers + SFX
   useEffect(() => {
     if (combatState?.enemies) {
       combatState.enemies.forEach((enemy: Enemy) => {
         const prevHp = prevEnemyHpsRef.current[enemy.idx];
-        if (prevHp !== undefined && enemy.hp < prevHp && enemy.hp > 0) {
-          triggerEffect({
-            type: 'shake',
-            targetId: `enemy_${enemy.idx}`,
-            duration: 400
-          });
+        if (prevHp !== undefined && enemy.hp !== prevHp) {
+          const delta = enemy.hp - prevHp;
+          if (delta < 0) {
+            const dmg = Math.abs(delta);
+            const isCrit = dmg >= Math.max(15, (enemy.max_hp || 80) * 0.12);
+            const tid = `enemy_${enemy.idx}`;
+            triggerEffect({ type: 'shake', targetId: tid, duration: 420 });
+            triggerEffect({ type: 'impact', targetId: tid, duration: 420, isCrit });
+            triggerEffect({
+              type: 'damage_number',
+              targetId: tid,
+              amount: dmg,
+              isCrit,
+              duration: 1000,
+              text: `-${dmg}`,
+            });
+            if (isCrit) {
+              triggerEffect({ type: 'crit_burst', targetId: tid, duration: 550 });
+              triggerEffect({
+                type: 'screen_flash',
+                targetId: 'global',
+                duration: 320,
+                color: 'crit',
+              });
+            }
+            audioManager.playHit(isCrit, Math.min(1.5, 0.75 + dmg / 50));
+          } else if (delta > 0) {
+            triggerEffect({ type: 'heal_glow', targetId: `enemy_${enemy.idx}`, duration: 1000 });
+          }
         }
         prevEnemyHpsRef.current[enemy.idx] = enemy.hp;
       });
@@ -107,6 +243,7 @@ export const CombatView: React.FC = () => {
   }
 
   const handleOptionClick = (key: string) => {
+    audioManager.playUiClick();
     sendAction({ action: "MENU_CHOICE", value: key });
   };
 
@@ -188,6 +325,10 @@ export const CombatView: React.FC = () => {
       <div className="bg-gray-950 px-4 py-2 border-b border-red-900/30 flex justify-between items-center z-20">
         <span className="text-[10px] text-red-500 font-cinzel tracking-widest font-bold">⚔️ COMBATE COOPERATIVO</span>
         <div className="flex gap-2">
+          <button onClick={() => sendAction({action: "OPEN_TALENTS"})}
+              className="bg-gray-900 border border-green-750 hover:border-green-500 text-green-400 px-3 py-1 rounded font-cinzel text-[10px] transition-all shadow hover:shadow-[0_0_10px_rgba(34,197,94,0.15)]">
+              🌳 Talentos
+          </button>
           <button onClick={() => sendAction({action: "OPEN_INVENTORY"})}
               className="bg-gray-900 border border-yellow-750 hover:border-yellow-500 text-yellow-400 px-3 py-1 rounded font-cinzel text-[10px] transition-all shadow hover:shadow-[0_0_10px_rgba(234,179,8,0.15)]">
               🎒 Inventário
@@ -210,6 +351,25 @@ export const CombatView: React.FC = () => {
       </div>
              {/* 2. Arena */}
       <div className="flex-1 flex flex-row justify-between items-end px-8 md:px-20 pb-8 relative overflow-hidden min-h-[360px]">
+        {/* Weather & Time Overlays */}
+        {timeOfDay === "Noite" && (
+          <div className="absolute inset-0 bg-blue-950/20 mix-blend-multiply pointer-events-none z-10" />
+        )}
+        {timeOfDay === "Noite" && (
+          <div className="absolute inset-0 bg-black/25 pointer-events-none z-10" />
+        )}
+        {(weather === "Chuvoso" || weather === "Tempestade") && (
+          <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden bg-blue-900/5">
+            <div className="rain-effect opacity-35" />
+          </div>
+        )}
+        {weather === "Nevoeiro" && (
+          <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden bg-slate-800/15">
+            {/* soft mist layers (see .fog-effect) — not tiled dots */}
+            <div className="fog-effect" />
+          </div>
+        )}
+
         {/* Banner de Intro Dramática do Inimigo/Boss */}
         {(() => {
           const introEffect = effects.find(e => e.type === 'enemy_intro');
@@ -266,23 +426,55 @@ export const CombatView: React.FC = () => {
         {/* Projectile animations layer */}
         <ProjectileLayer />
 
+        {/* Global screen flashes (damage / crit / heal / lightning) */}
+        {effects
+          .filter((e) => e.type === 'screen_flash' || e.type === 'lightning')
+          .map((e) => (
+            <div
+              key={e.id}
+              className={`screen-flash ${
+                e.type === 'lightning' ? 'lightning' : e.color || 'damage'
+              }`}
+            />
+          ))}
+
         {/* Herói (Esquerda) */}
         <div className="flex flex-col gap-4 z-20 shrink-0 items-center justify-center min-h-[300px]">
             {(gameState?.party || [gameState?.player]).map((member: any) => {
                 if (!member) return null;
                 const memberClientId = member.client_id || 'leader';
+                const partyTid = `party_${memberClientId}`;
                 const hasSubmitted = combatState?.submitted_actions?.includes(memberClientId);
                 const isMe = memberClientId === myClientId || (!myClientId && memberClientId === 'leader');
                 const memberClass = member.char_class || member.class;
-                const hasShake = effects.some(e => e.targetId === `party_${memberClientId}` && e.type === 'shake');
-                const hasHealGlow = effects.some(e => e.type === 'heal_glow' && e.targetId === memberClientId);
+                const hasShake = effects.some(e => (e.targetId === partyTid || e.targetId === memberClientId) && e.type === 'shake');
+                const hasImpact = effects.some(e => (e.targetId === partyTid || e.targetId === memberClientId) && e.type === 'impact');
+                const hasHealGlow = effects.some(e => e.type === 'heal_glow' && (e.targetId === memberClientId || e.targetId === partyTid || e.targetId === 'leader'));
+                const auraClass = getSubclassAuraClass(member.talents_unlocked);
+                const numbers = effects.filter(
+                  e => (e.type === 'damage_number' || e.type === 'heal_number') &&
+                    (e.targetId === partyTid || e.targetId === memberClientId)
+                );
                 return (
                     <div key={memberClientId}
-                         className={`flex flex-col items-center w-32 transition-all duration-500
+                         className={`relative flex flex-col items-center w-32 transition-all duration-500 rounded-lg p-1.5
                                     ${hasSubmitted ? 'opacity-40 grayscale' : 'opacity-100'}
-                                    ${isMe ? 'ring-2 ring-yellow-400 rounded-lg p-1.5 bg-yellow-950/15' : ''}
+                                    ${isMe ? 'ring-2 ring-yellow-400 bg-yellow-950/15' : ''}
+                                    ${auraClass}
                                     ${hasShake ? 'animate-shake' : ''}
                                     ${hasHealGlow ? 'animate-heal-glow' : ''}`}>
+                        {hasImpact && (
+                          <div className={`impact-ring ${effects.some(e => e.targetId === partyTid && e.isCrit) ? 'crit' : ''}`} />
+                        )}
+                        {numbers.map((n) => (
+                          <span
+                            key={n.id}
+                            className={`floating-number ${n.type === 'heal_number' ? 'heal' : 'dmg'} ${n.isCrit ? 'crit' : ''}`}
+                            style={{ ['--dx' as any]: `${(Math.random() * 24 - 12).toFixed(0)}px` }}
+                          >
+                            {n.text}
+                          </span>
+                        ))}
                         <div className="w-full h-2 bg-gray-900 rounded-full overflow-hidden mb-0.5">
                             <div className="h-full bg-gradient-to-r from-red-700 to-red-500 transition-all duration-500"
                                  style={{ width: `${(member.hp / member.max_hp) * 100}%` }} />
@@ -292,7 +484,7 @@ export const CombatView: React.FC = () => {
                                  style={{ width: `${(member.mp / (member.max_mp || 1)) * 100}%` }} />
                         </div>
                         <img src={getHeroSprite(memberClass)}
-                             className="w-24 h-24 object-contain drop-shadow-[0_0_10px_rgba(255,255,255,0.05)]"
+                             className={`w-24 h-24 object-contain drop-shadow-[0_0_10px_rgba(255,255,255,0.05)] ${hasImpact ? 'animate-hit-flash' : ''}`}
                              alt={member.name} />
                         <div className="mt-1 text-xs font-cinzel font-bold text-center"
                              style={{ color: isMe ? '#fbbf24' : '#9ca3af' }}>
@@ -331,15 +523,51 @@ export const CombatView: React.FC = () => {
         {/* Inimigos (Direita) */}
         <div className="flex flex-row gap-6 z-20 shrink-0 items-end">
           {combatState.enemies.map((enemy: Enemy) => {
-            const hasShake = effects.some(e => e.targetId === `enemy_${enemy.idx}` && e.type === 'shake');
-            const hasHealGlow = effects.some(e => e.type === 'heal_glow' && e.targetId === `enemy_${enemy.idx}`);
+            const tid = `enemy_${enemy.idx}`;
+            const hasShake = effects.some(e => e.targetId === tid && e.type === 'shake');
+            const hasImpact = effects.some(e => e.targetId === tid && e.type === 'impact');
+            const hasHealGlow = effects.some(e => e.type === 'heal_glow' && e.targetId === tid);
+            const hasCritBurst = effects.some(e => e.targetId === tid && e.type === 'crit_burst');
+            const numbers = effects.filter(
+              e => (e.type === 'damage_number' || e.type === 'heal_number') && e.targetId === tid
+            );
             return (
               <div
                 key={enemy.idx}
-                className={`flex flex-col items-center w-64 transition-all duration-700 ${
+                className={`relative flex flex-col items-center w-64 transition-all duration-700 ${
                   !enemy.alive ? 'animate-death' : ''
                 } ${hasShake ? 'animate-shake' : ''} ${hasHealGlow ? 'animate-heal-glow' : ''}`}
               >
+                {hasImpact && (
+                  <div className={`impact-ring ${effects.some(e => e.targetId === tid && e.isCrit) ? 'crit' : ''}`} />
+                )}
+                {hasCritBurst && (
+                  <div className="particle-burst" style={{ color: '#ffb347' }}>
+                    {Array.from({ length: 10 }).map((_, i) => {
+                      const ang = (i / 10) * Math.PI * 2;
+                      const dist = 48 + (i % 3) * 12;
+                      return (
+                        <span
+                          key={i}
+                          style={{
+                            ['--px' as any]: `${Math.cos(ang) * dist}px`,
+                            ['--py' as any]: `${Math.sin(ang) * dist}px`,
+                            animationDelay: `${i * 12}ms`,
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+                {numbers.map((n) => (
+                  <span
+                    key={n.id}
+                    className={`floating-number ${n.type === 'heal_number' ? 'heal' : 'dmg'} ${n.isCrit ? 'crit' : ''}`}
+                    style={{ ['--dx' as any]: `${(Math.random() * 28 - 14).toFixed(0)}px` }}
+                  >
+                    {n.text}
+                  </span>
+                ))}
                 {/* Barra HP inimigo */}
                 <div className="w-full mb-2 relative">
                   <div className="w-full h-4 bg-gray-900/80 rounded-full overflow-hidden border border-gray-700">
@@ -375,12 +603,12 @@ export const CombatView: React.FC = () => {
                       <img
                         src={sprite}
                         alt={enemy.name}
-                        className={`w-56 h-56 object-contain ${enemy.alive ? 'drop-shadow-[0_0_25px_rgba(220,38,38,0.4)]' : ''}`}
+                        className={`w-56 h-56 object-contain ${enemy.alive ? 'drop-shadow-[0_0_25px_rgba(220,38,38,0.4)]' : ''} ${hasImpact ? 'animate-hit-flash' : ''}`}
                       />
                     );
                   }
                   return (
-                    <div className={`w-56 h-56 flex items-center justify-center text-7xl rounded bg-gradient-to-br from-gray-900 to-black border border-gray-800 ${enemy.alive ? 'shadow-[0_0_30px_rgba(220,38,38,0.2)]' : ''}`}>
+                    <div className={`w-56 h-56 flex items-center justify-center text-7xl rounded bg-gradient-to-br from-gray-900 to-black border border-gray-800 ${enemy.alive ? 'shadow-[0_0_30px_rgba(220,38,38,0.2)]' : ''} ${hasImpact ? 'animate-hit-flash' : ''}`}>
                       {getEnemyFallbackEmoji(enemy.name)}
                     </div>
                   );
@@ -389,6 +617,29 @@ export const CombatView: React.FC = () => {
                 <div className="mt-3 font-cinzel font-bold text-red-400 text-sm bg-gray-950/90 px-3 py-1 rounded border border-red-900/50 text-center">
                   {enemy.name}
                 </div>
+
+                {enemy.intent && enemy.alive && (
+                  <span
+                    className={`mt-1 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded border ${
+                      INTENT_STYLE[enemy.intent.category] || INTENT_STYLE.none
+                    }`}
+                    title={
+                      enemy.intent.uninterruptible
+                        ? 'Ação ininterrupível'
+                        : enemy.intent.interrupted
+                          ? 'Interrompido'
+                          : `Intenção: ${enemy.intent.label}`
+                    }
+                  >
+                    {INTENT_ICON[enemy.intent.category] || '·'}{' '}
+                    {enemy.intent.interrupted
+                      ? 'Interrompido'
+                      : enemy.intent.label}
+                    {enemy.intent.uninterruptible && !enemy.intent.interrupted
+                      ? ' ⛔'
+                      : ''}
+                  </span>
+                )}
 
                 {enemy.defending && (
                   <span className="text-xs text-blue-400 mt-1 font-bold animate-pulse">

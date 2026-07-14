@@ -75,48 +75,282 @@ body {
 }
 
 @keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-8px); }
-  75% { transform: translateX(8px); }
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  10% { transform: translate3d(-10px, 2px, 0) rotate(-1deg); }
+  20% { transform: translate3d(12px, -3px, 0) rotate(1deg); }
+  30% { transform: translate3d(-14px, 1px, 0) rotate(-1.5deg); }
+  40% { transform: translate3d(10px, 3px, 0) rotate(1deg); }
+  50% { transform: translate3d(-8px, -2px, 0) rotate(-0.5deg); }
+  60% { transform: translate3d(8px, 2px, 0) rotate(0.5deg); }
+  70% { transform: translate3d(-5px, 0, 0); }
+  80% { transform: translate3d(4px, -1px, 0); }
+  90% { transform: translate3d(-2px, 0, 0); }
 }
 
 @keyframes death {
-  to { opacity: 0; transform: scale(0.8); filter: grayscale(1); }
+  0% { opacity: 1; filter: grayscale(0) brightness(1); transform: scale(1); }
+  40% { filter: grayscale(0.4) brightness(1.4); }
+  100% { opacity: 0; transform: scale(0.75) translateY(12px); filter: grayscale(1) brightness(0.4); }
 }
 
 .animate-shake {
-  animation: shake 0.4s ease-in-out;
+  animation: shake 0.45s cubic-bezier(.36,.07,.19,.97) both;
 }
 
 .animate-death {
-  animation: death 0.8s ease-out forwards;
+  animation: death 0.9s ease-out forwards;
 }
 
-/* Combat projectile animations */
-.projectile-icon {
-    position: absolute;
-    top: 45%;
-    font-size: 2.2rem;
-    filter: drop-shadow(0 0 10px currentColor);
-    z-index: 30;
+/* Hit flash (white crush) on sprites */
+@keyframes hitFlash {
+  0% { filter: brightness(1) saturate(1); }
+  15% { filter: brightness(2.4) saturate(0.2); }
+  40% { filter: brightness(1.4) saturate(1.2); }
+  100% { filter: brightness(1) saturate(1); }
 }
+.animate-hit-flash {
+  animation: hitFlash 0.35s ease-out;
+}
+
+@keyframes impactRing {
+  0% { transform: scale(0.4); opacity: 0.9; border-width: 4px; }
+  100% { transform: scale(1.8); opacity: 0; border-width: 0; }
+}
+.impact-ring {
+  position: absolute;
+  inset: 15%;
+  border-radius: 9999px;
+  border: 3px solid rgba(255, 220, 120, 0.9);
+  box-shadow: 0 0 24px rgba(255, 180, 40, 0.7);
+  pointer-events: none;
+  animation: impactRing 0.45s ease-out forwards;
+  z-index: 40;
+}
+.impact-ring.crit {
+  border-color: rgba(255, 80, 60, 0.95);
+  box-shadow: 0 0 32px rgba(255, 40, 20, 0.85), 0 0 60px rgba(255, 200, 0, 0.4);
+}
+
+/* Floating combat numbers */
+@keyframes floatDamage {
+  0% { opacity: 0; transform: translate(-50%, 10px) scale(0.6); }
+  12% { opacity: 1; transform: translate(-50%, 0) scale(1.15); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 0px)), -56px) scale(0.9); }
+}
+.floating-number {
+  position: absolute;
+  left: 50%;
+  top: 18%;
+  font-family: 'Cinzel', serif;
+  font-weight: 900;
+  font-size: 1.35rem;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+  z-index: 50;
+  text-shadow: 0 2px 0 #000, 0 0 12px currentColor;
+  animation: floatDamage 0.95s ease-out forwards;
+  --dx: 0px;
+}
+.floating-number.crit {
+  font-size: 1.85rem;
+  color: #ffd166;
+  text-shadow: 0 0 8px #ff6b35, 0 2px 0 #000, 0 0 22px #f39c12;
+}
+.floating-number.dmg { color: #ff4d4d; }
+.floating-number.heal { color: #4ade80; }
+
+/* Combat projectile orbs + trails */
+.projectile-core {
+  position: absolute;
+  top: 42%;
+  width: 28px;
+  height: 28px;
+  z-index: 30;
+  will-change: left, transform, opacity;
+}
+.projectile-core-inner {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 30% 30%, #fff 0%, currentColor 45%, transparent 70%);
+  box-shadow: 0 0 18px currentColor, 0 0 36px currentColor;
+}
+.projectile-trail {
+  position: absolute;
+  right: 50%;
+  top: 50%;
+  width: 64px;
+  height: 10px;
+  transform: translateY(-50%);
+  border-radius: 9999px;
+  background: linear-gradient(90deg, transparent, currentColor);
+  opacity: 0.55;
+  filter: blur(2px);
+}
+.projectile-spark {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 8px currentColor;
+  opacity: 0.85;
+}
+.projectile-spark.s1 { top: -4px; left: 8px; }
+.projectile-spark.s2 { bottom: -2px; right: 4px; }
+
+.proj-fireball { color: #ff6b2c; }
+.proj-arrow { color: #e8e0c8; }
+.proj-slash { color: #f5f5f5; }
+.proj-holy { color: #ffe566; }
+.proj-default { color: #7dd3fc; }
 
 @keyframes projectileRight {
-    from { left: 15%; opacity: 1; transform: scale(0.6) rotate(0deg); }
-    to   { left: 80%; opacity: 1; transform: scale(1.3) rotate(15deg); }
+  0% { left: 18%; opacity: 0; transform: scale(0.5) rotate(-12deg); }
+  12% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { left: 78%; opacity: 0; transform: scale(1.35) rotate(18deg); }
 }
 @keyframes projectileLeft {
-    from { left: 80%; opacity: 1; transform: scale(0.6) rotate(0deg); }
-    to   { left: 15%; opacity: 1; transform: scale(1.3) rotate(-15deg); }
+  0% { left: 78%; opacity: 0; transform: scale(0.5) rotate(12deg); }
+  12% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { left: 18%; opacity: 0; transform: scale(1.35) rotate(-18deg); }
 }
 .animate-projectile-right { animation: projectileRight linear forwards; }
 .animate-projectile-left  { animation: projectileLeft linear forwards; }
 
 @keyframes healGlow {
-    0%   { box-shadow: 0 0 0px rgba(74, 222, 128, 0); }
-    50%  { box-shadow: 0 0 35px rgba(74, 222, 128, 0.85); }
-    100% { box-shadow: 0 0 0px rgba(74, 222, 128, 0); }
+  0%   { box-shadow: 0 0 0 rgba(74, 222, 128, 0); filter: brightness(1); }
+  40%  { box-shadow: 0 0 40px rgba(74, 222, 128, 0.9), 0 0 80px rgba(34, 197, 94, 0.35); filter: brightness(1.25) saturate(1.3); }
+  100% { box-shadow: 0 0 0 rgba(74, 222, 128, 0); filter: brightness(1); }
 }
 .animate-heal-glow {
-    animation: healGlow 1.2s ease-in-out;
+  animation: healGlow 1.15s ease-in-out;
 }
+
+/* Full-screen combat flashes */
+.screen-flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 45;
+  animation: screenFlash 0.35s ease-out forwards;
+}
+.screen-flash.damage { background: radial-gradient(ellipse at center, transparent 30%, rgba(180, 0, 0, 0.35) 100%); }
+.screen-flash.crit { background: radial-gradient(ellipse at center, rgba(255, 220, 100, 0.15) 0%, rgba(180, 20, 0, 0.4) 100%); }
+.screen-flash.heal { background: radial-gradient(ellipse at center, rgba(80, 255, 140, 0.12) 0%, transparent 70%); }
+.screen-flash.lightning {
+  background: #eef6ff;
+  animation: lightningFlash 0.55s steps(2, end) forwards;
+}
+@keyframes screenFlash {
+  0% { opacity: 0.95; }
+  100% { opacity: 0; }
+}
+@keyframes lightningFlash {
+  0%, 40%, 70% { opacity: 0.9; }
+  20%, 55%, 100% { opacity: 0; }
+}
+
+/* Particle burst (crit / death) */
+.particle-burst {
+  position: absolute;
+  left: 50%;
+  top: 45%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 42;
+}
+.particle-burst span {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  animation: particleOut 0.55s ease-out forwards;
+}
+@keyframes particleOut {
+  0% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(var(--px), var(--py)) scale(0.2); opacity: 0; }
+}
+
+/* Weather effects */
+@keyframes rain {
+  0% { background-position: 0 0, 0 0; }
+  100% { background-position: 40px 180px, -30px 220px; }
+}
+.rain-effect {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* two staggered diagonal streak layers — denser, less “scanline” */
+  background-image:
+    repeating-linear-gradient(
+      105deg,
+      transparent 0,
+      transparent 14px,
+      rgba(180, 200, 220, 0.14) 14px,
+      rgba(180, 200, 220, 0.14) 15px,
+      transparent 16px,
+      transparent 28px
+    ),
+    repeating-linear-gradient(
+      100deg,
+      transparent 0,
+      transparent 22px,
+      rgba(160, 185, 210, 0.09) 22px,
+      rgba(160, 185, 210, 0.09) 23px,
+      transparent 24px,
+      transparent 48px
+    );
+  animation: rain 0.45s linear infinite;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 88%, transparent 100%);
+}
+
+/* Soft volumetric mist — NOT tiled circles (those read as beach waves) */
+.fog-effect {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 90% 55% at 20% 70%, rgba(200, 210, 220, 0.22) 0%, transparent 70%),
+    radial-gradient(ellipse 80% 50% at 75% 40%, rgba(190, 200, 215, 0.18) 0%, transparent 65%),
+    radial-gradient(ellipse 100% 40% at 50% 90%, rgba(170, 185, 200, 0.28) 0%, transparent 60%),
+    linear-gradient(to top, rgba(140, 155, 170, 0.35) 0%, transparent 45%);
+  filter: blur(2px);
+}
+.fog-effect::before,
+.fog-effect::after {
+  content: '';
+  position: absolute;
+  inset: -20% -40%;
+  pointer-events: none;
+}
+.fog-effect::before {
+  background:
+    radial-gradient(ellipse 45% 35% at 30% 50%, rgba(220, 228, 235, 0.35) 0%, transparent 70%),
+    radial-gradient(ellipse 40% 30% at 70% 60%, rgba(200, 210, 225, 0.28) 0%, transparent 70%);
+  animation: fogDriftA 28s ease-in-out infinite alternate;
+  filter: blur(18px);
+}
+.fog-effect::after {
+  background:
+    radial-gradient(ellipse 50% 40% at 55% 45%, rgba(210, 220, 230, 0.3) 0%, transparent 68%),
+    radial-gradient(ellipse 35% 28% at 15% 65%, rgba(185, 198, 212, 0.25) 0%, transparent 70%);
+  animation: fogDriftB 36s ease-in-out infinite alternate;
+  filter: blur(24px);
+  opacity: 0.85;
+}
+@keyframes fogDriftA {
+  0%   { transform: translate3d(-6%, 2%, 0) scale(1.05); }
+  100% { transform: translate3d(8%, -3%, 0) scale(1.12); }
+}
+@keyframes fogDriftB {
+  0%   { transform: translate3d(5%, -2%, 0) scale(1.1); }
+  100% { transform: translate3d(-10%, 4%, 0) scale(1.05); }
+}
+

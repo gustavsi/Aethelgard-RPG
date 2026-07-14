@@ -202,7 +202,7 @@ export const WebSocketProvider: React.FC<ProviderProps> = ({ children, sessionId
             setSystemNotification(data.content);
           }
         } else if (data.type === 'SOUND_EFFECT') {
-          audioManager.playSFX(data.effect_id);
+          audioManager.playSFX(data.effect_id || data.name || data.sound);
         } else if (data.type === 'WAITING_INPUT') {
           // Keep previous game state, just update the UI waiting state
           setUiContext({
@@ -223,15 +223,31 @@ export const WebSocketProvider: React.FC<ProviderProps> = ({ children, sessionId
             prompt: data.message || "",
           });
         } else if (data.type === 'VISUAL_EFFECT') {
+          const effectType = data.effect_type || data.type;
+          // Map backend lightning / flash aliases
+          let type = effectType;
+          if (effectType === 'lightning') type = 'lightning';
           triggerEffect({
-            type: data.effect_type,
+            type,
             targetId: data.target_id || 'global',
             text: data.text,
             color: data.color,
-            duration: data.duration || 2500,
+            duration: data.duration || (type === 'projectile' ? 650 : 900),
             fromSide: data.from_side,
             projectileStyle: data.style,
+            amount: data.amount,
+            isCrit: data.is_crit,
           });
+          // Soft SFX pairing when engine only sent VFX
+          if (type === 'projectile' && data.style === 'fireball') {
+            audioManager.playSFX('magic_cast');
+          } else if (type === 'projectile' && data.style === 'arrow') {
+            audioManager.playSFX('arrow_release');
+          } else if (type === 'heal_glow') {
+            audioManager.playSFX('heal_chime');
+          } else if (type === 'lightning') {
+            audioManager.playSFX('LIGHTNING_BOOM');
+          }
         }
       } catch (err) {
         console.error('Failed to parse WebSocket message', err);
