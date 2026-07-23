@@ -340,7 +340,13 @@ class CombatSystem:
                 p for p in party
                 if p.hp > 0 and StatusEffect.ATORDOADO not in p.status_effects
             ]
-        active_ids = [getattr(p, 'client_id', None) or 'leader' for p in active_party_members]
+        active_ids = []
+        for p in active_party_members:
+            cid = getattr(p, 'client_id', None)
+            if cid:
+                active_ids.append(cid)
+            elif p == self.player:
+                active_ids.append('leader')
         
         if not active_ids or all(cid in self.pending_actions for cid in active_ids):
             self.phase = CombatPhase.PARTY_EXECUTE
@@ -873,25 +879,32 @@ class CombatSystem:
         self.rewards["xp"] = total_xp
 
         party = list(getattr(self.state, 'party', None) or [self.player])
-        # Prefer living members; fall back to full party so someone always gets rewards
-        recipients = [p for p in party if p.hp > 0] or party or [self.player]
-        n = max(1, len(recipients))
+        # Only living members get rewards (dead members like a fallen leader receive nothing)
+        recipients = [p for p in party if p.hp > 0]
+        if not recipients:
+            self.add_log("Toda a party foi derrotada — nenhuma recompensa obtida.")
+            return
 
-        # Full XP to each party member (co-op), gold split evenly
-        gold_each = total_gold // n
-        gold_remainder = total_gold - (gold_each * n)
-        self.add_log(f"Ouro ganho: {total_gold}g (dividido entre {n})")
+        n = len(recipients)
+
+        # XP and Gold divided equally among living members (Option B)
+        xp_share = total_xp // n
+        gold_share = total_gold // n
+        gold_remainder = total_gold - (gold_share * n)
+
+        self.add_log(f"Ouro ganho: {total_gold}g (dividido em {gold_share}g para cada um dos {n} membro(s) vivo(s))")
+        self.add_log(f"XP ganha: {total_xp} ({xp_share} XP para cada membro vivo)")
+
         for i, p in enumerate(recipients):
-            share = gold_each + (gold_remainder if i == 0 else 0)
+            share = gold_share + (gold_remainder if i == 0 else 0)
             p.gold += share
-            for log in p.gain_xp(total_xp):
-                # Prefix non-leader logs so multi-player level-ups are clear
+            for log in p.gain_xp(xp_share):
                 if p is not self.player and log:
                     self.add_log(f"[{p.name}] {log}")
                 else:
                     self.add_log(log)
         
-        for enemy in eligible_enemies:
+        for idx, enemy in enumerate(eligible_enemies):
             chance = 1.0 if "Ogro" in enemy.name or "Inquisidor" in enemy.name or "Malakar" in enemy.name else 0.45
             if random.random() < chance:
                 ref_level = max(p.level for p in recipients)
@@ -899,14 +912,13 @@ class CombatSystem:
                 if item:
                     self.rewards["loot"].append(item)
                     self.add_log(f"Loot Encontrado: {item.name}")
-                    # Consumables go to shared stock via InventoryList; gear to a random recipient
                     if isinstance(item, Consumable):
                         if hasattr(self.state, "shared_inventory"):
                             self.state.shared_inventory.append(item)
                         else:
-                            recipients[0].inventory.append(item)
+                            recipients[idx % n].inventory.append(item)
                     else:
-                        random.choice(recipients).inventory.append(item)
+                        recipients[idx % n].inventory.append(item)
 
     def run(self) -> Union[bool, str]:
         from engine.combat_ui import CombatUI

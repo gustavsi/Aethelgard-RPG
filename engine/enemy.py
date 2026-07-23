@@ -25,14 +25,24 @@ class Enemy:
             self.max_phases = 3
             
         self.transformed = False
-        self.fled = False
-
     def is_alive(self) -> bool:
         return self.hp > 0
 
+    def get_attack_power(self) -> int:
+        atk = self.attack
+        if StatusEffect.FURIA in self.status_effects:
+            atk = int(atk * 1.3)
+        return atk
+
+    def get_defense_power(self) -> int:
+        defense = self.defense
+        if StatusEffect.FURIA in self.status_effects:
+            defense = max(0, int(defense * 0.7))
+        return defense
+
     def take_damage(self, raw_damage: int) -> Dict[str, Any]:
         """Takes damage, applying defense and status effects. Returns dictionary."""
-        mitigation = self.defense
+        mitigation = self.get_defense_power()
         if self.defending:
             mitigation = int(mitigation * 1.5) + 5
             

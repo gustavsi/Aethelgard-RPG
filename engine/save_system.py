@@ -96,6 +96,11 @@ def serialize_player(player) -> dict:
 
 def apply_player_data(player: Player, p_data: dict) -> Player:
     """Apply serialized fields onto an existing Player instance."""
+    if p_data.get("class"):
+        try:
+            player.char_class = CharacterClass[p_data["class"]]
+        except Exception:
+            pass
     player.level = p_data.get("level", 1)
     player.xp = p_data.get("xp", 0)
     player.max_hp = p_data.get("max_hp", player.max_hp)
@@ -114,8 +119,6 @@ def apply_player_data(player: Player, p_data: dict) -> Player:
     for item_data in p_data.get("inventory", []):
         item = _deserialize_item(item_data)
         if item:
-            # Bypass shared-inventory redirect for non-consumables path on restore:
-            # use list.append on InventoryList for equipment; consumables go to inventory list
             list.append(player.inventory, item)
 
     weapon_data = p_data.get("weapon")
@@ -230,11 +233,9 @@ def load_game(session_id: str = None) -> GameState:
     party_data = data.get("party") or [p_data]
     restored_party = []
     for pd in party_data:
-        # Prefer matching leader object for the main player entry
         if pd.get("name", "").lower() == player.name.lower() and pd.get("class") == player.char_class.name:
             if player not in restored_party:
                 restored_party.append(player)
-                # Re-apply in case party entry is more complete
                 apply_player_data(player, pd)
             continue
         restored_party.append(deserialize_player(pd))
@@ -261,7 +262,6 @@ def load_game(session_id: str = None) -> GameState:
         for k, v in old_p_choices.items():
             state.flags[k] = v
 
-    # Phase 2 meta (bonds/debts/corruption); bootstrap from flags if missing
     from engine.party_meta import deserialize_meta
     deserialize_meta(state, data.get("party_meta"))
 
@@ -272,6 +272,7 @@ def merge_lobby_party_with_save(loaded_state: GameState, lobby_players: list) ->
     """
     Match lobby-connected Player shells to saved party members by name (then class).
     Restores stats/talents/gear onto the live objects and assigns client_ids from lobby.
+    Preserves any saved party members that are not connected in the lobby.
     """
     if not loaded_state:
         return lobby_players
@@ -310,7 +311,11 @@ def merge_lobby_party_with_save(loaded_state: GameState, lobby_players: list) ->
             # New join — keep level-1 lobby shell
             merged.append(live)
 
-    # If no lobby players (edge case), return saved
+    # Preserve any saved members not connected in current lobby session
+    for i, sp in enumerate(saved):
+        if i not in used:
+            merged.append(sp)
+
     if not merged:
         return saved
 

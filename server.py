@@ -517,7 +517,7 @@ def migrate_combat_client_id(world, old_id, new_id):
         cache.discard(old_id)
         cache.add(new_id)
 
-NARRATIVE_LOG_MAX = 100
+NARRATIVE_LOG_MAX = 50
 
 def send_player_ready_prompt(session, client_id, world):
     if not world or not world.state:
